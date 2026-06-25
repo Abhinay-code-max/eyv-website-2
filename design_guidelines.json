@@ -1,0 +1,90 @@
+{
+  "theme": "Light",
+  "archetype": "1 - Organic & Earthy",
+  "mood": "Cinematic, inviting, effortless travel. Like flipping through a premium travel magazine. Grounded, yet luxurious.",
+  "colors": {
+    "primary": "#C47245",
+    "secondary": "#2A4B5C",
+    "background": "#FDFBF7",
+    "surface": "#FFFFFF",
+    "surface_muted": "#F5F2EB",
+    "text_main": "#1C1917",
+    "text_muted": "#57534E",
+    "accent_warm": "#E8B273",
+    "accent_cool": "#86A8B3",
+    "border": "#E7E5E4"
+  },
+  "typography": {
+    "heading_font": "Cormorant Garamond",
+    "body_font": "Outfit",
+    "rules": {
+      "h1": "text-5xl md:text-6xl tracking-tighter leading-none font-semibold text-[#1C1917]",
+      "h2": "text-3xl md:text-4xl tracking-tight font-medium text-[#1C1917]",
+      "h3": "text-xl md:text-2xl font-medium text-[#2A4B5C]",
+      "body": "text-base leading-relaxed text-[#57534E]",
+      "labels": "uppercase text-xs tracking-[0.2em] font-medium text-[#C47245]"
+    }
+  },
+  "layout_spacing": {
+    "grid": "Use bento grid 'Tetris' logic for marketing landing page sections. For the AI planner dashboard, use a 'Control Room' grid (Map on the left, pinned editable itinerary timeline rail on the right).",
+    "spacing": "Generous spacing. Use p-8 to p-16 for containers. CRITICAL: Containers with borders must have internal padding (p-6 or p-8).",
+    "surfaces": "Use 'Glassmorphism (Crystal)' with backdrop-blur-xl and bg-white/70 for sticky headers and AI floating panels. Use solid 'Neumorphism' with sharp 1px borders for dashboard cards.",
+    "alignment": "Optical alignment over geometrical. Left-align dense content. Do not center everything."
+  },
+  "motion_interaction": {
+    "hover": "Hover states must explicitly set text color. Subtle -translate-y-1 on feature cards.",
+    "transitions": "Use specific properties (e.g., transition: transform 0.2s ease, opacity 0.2s ease). Do not use transition-all.",
+    "marquee": "Use Option A 'Editorial Ribbon' for destinations or partners scrolling. Slow organic drift with wide gaps."
+  },
+  "components": {
+    "marketing": "Pure HTML + Tailwind CSS. Raw divs for overlapping and asymmetry. Heavy use of high-quality images.",
+    "dashboard_and_forms": "Shadcn components heavily customized. Go cardless or use flat, dense styles for data.",
+    "charts": "Shadcn charts or Recharts for the interactive dashboard cost breakdown."
+  },
+  "testing": {
+    "requirement": "CRITICAL: All interactive elements (buttons, links, inputs, tabs) MUST include a data-testid attribute in kebab-case (e.g., data-testid='book-now-button')."
+  },
+  "icons": {
+    "library": "lucide-react",
+    "instructions": "Use lucide-react for standard icons. For the EYV logo, do not use a raster image. Instead, create a premium animated logo using the lucide 'Globe' and 'Plane' icons with an SVG trail effect."
+  },
+  "media": {
+    "images": [
+      {
+        "category": "Hero / Destination (Resort)",
+        "url": "https://images.pexels.com/photos/6875499/pexels-photo-6875499.jpeg",
+        "description": "Aerial view of a luxury tropical beach resort."
+      },
+      {
+        "category": "Adventure / Activities",
+        "url": "https://images.unsplash.com/photo-1558883493-8b86ff880fec",
+        "description": "Person standing on a cliff during golden hour."
+      },
+      {
+        "category": "Culinary / Restaurant",
+        "url": "https://images.pexels.com/photos/30924602/pexels-photo-30924602.jpeg",
+        "description": "Warm interior of a local authentic restaurant."
+      },
+      {
+        "category": "Hotels / Accommodation",
+        "url": "https://images.unsplash.com/photo-1731336478850-6bce7235e320",
+        "description": "Luxury hotel room interior with a white bed and wooden headboard."
+      },
+      {
+        "category": "Immersive Section / Parallax Background",
+        "url": "https://images.pexels.com/photos/25706808/pexels-photo-25706808.jpeg",
+        "description": "Solitary figure on a sandy beach."
+      }
+    ],
+    "logos": "NO PLACEHOLDER URLs ALLOWED for any logos. Build the EYV logo using code/SVG."
+  },
+  "instructions_to_main_agent": [
+    "Ensure the hero image has a subtle gradient overlay (e.g., bg-gradient-to-r from-black/50 to-transparent) to preserve visibility while keeping text readable. Max opacity 50%.",
+    "Implement the AI Planner Interface as a multi-step floating glass panel over a contextual map or background.",
+    "For the vacation dashboard, use a Map-First + Itinerary Right-Rail Split View layout.",
+    "NEVER use Inter, Roboto, or Open Sans for headings. Use Cormorant Garamond for headings and Outfit for body text.",
+    "Ensure all buttons and links have distinct hover states with contrast.",
+    "Do not use generic shadcn cards for marketing; build bento grids. Use customized shadcn for the dashboard components.",
+    "Remember to include data-testid on all interactive elements as requested."
+  ]
+}
