@@ -1,5 +1,4 @@
 export const HOME = {
-  emergentLink: 'emergent-link',
   loginButton: 'login-button',
   getStartedButton: 'get-started-button',
   heroSection: 'hero-section',

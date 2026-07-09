@@ -1,28 +1,51 @@
 from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, UploadFile, File, Header, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, RedirectResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
 from pathlib import Path
+
+# Must run before importing any service module below - several of them read
+# their API keys from os.environ at import time, so .env has to be loaded first.
+ROOT_DIR = Path(__file__).parent
+load_dotenv(ROOT_DIR / '.env')
+
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Dict, Any
 import uuid
+import secrets
+from urllib.parse import urlencode
 from datetime import datetime, timezone, timedelta
 import httpx
 import asyncio
-from emergentintegrations.llm.chat import LlmChat, UserMessage, TextDelta, StreamDone
-from emergentintegrations.payments.stripe.checkout import StripeCheckout, CheckoutSessionRequest
+from openai import AsyncOpenAI
+from google import genai
+from google.genai import types as genai_types
+import stripe
 from services import amadeus_service, storage_service, rewards_service, locations_service
-
-ROOT_DIR = Path(__file__).parent
-load_dotenv(ROOT_DIR / '.env')
+from services import ignav_service as duffel_service  # Ignav replaces Sky Scrapper
+from services import serpapi_hotels_service
 
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
-EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY')
+OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
+openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)  # kept for potential future switch-back, currently unused
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+GEMINI_MODEL = "gemini-2.5-flash"  # gemini-2.0-flash/-lite return 429 (zero free-tier quota) and gemini-1.5-flash is 404 on this API key/version
+stripe.api_key = os.environ.get('STRIPE_API_KEY')
+
+GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID')
+GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET')
+GOOGLE_REDIRECT_URI = os.environ.get('GOOGLE_REDIRECT_URI')
+FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:3000')
+GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
+OAUTH_TICKET_TTL_SECONDS = 300
 
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
@@ -138,26 +161,94 @@ async def get_current_user(request: Request) -> User:
     return User(**user_doc)
 
 # Auth Routes
+@api_router.get("/auth/google/login")
+async def google_login():
+    if not GOOGLE_CLIENT_ID or not GOOGLE_REDIRECT_URI:
+        raise HTTPException(status_code=500, detail="Google OAuth not configured")
+
+    state = secrets.token_urlsafe(24)
+    await db.oauth_states.insert_one({
+        "state": state,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    })
+
+    params = {
+        "client_id": GOOGLE_CLIENT_ID,
+        "redirect_uri": GOOGLE_REDIRECT_URI,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "access_type": "online",
+        "prompt": "select_account",
+        "state": state,
+    }
+    return RedirectResponse(f"{GOOGLE_AUTH_URL}?{urlencode(params)}")
+
+
+@api_router.get("/auth/google/callback")
+async def google_callback(code: Optional[str] = None, state: Optional[str] = None, error: Optional[str] = None):
+    if error or not code or not state:
+        return RedirectResponse(f"{FRONTEND_URL}/login")
+
+    state_doc = await db.oauth_states.find_one({"state": state})
+    if not state_doc:
+        return RedirectResponse(f"{FRONTEND_URL}/login")
+    await db.oauth_states.delete_one({"state": state})
+
+    try:
+        async with httpx.AsyncClient() as client:
+            token_resp = await client.post(GOOGLE_TOKEN_URL, data={
+                "code": code,
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "redirect_uri": GOOGLE_REDIRECT_URI,
+                "grant_type": "authorization_code",
+            })
+            token_resp.raise_for_status()
+            tokens = token_resp.json()
+
+            userinfo_resp = await client.get(
+                GOOGLE_USERINFO_URL,
+                headers={"Authorization": f"Bearer {tokens['access_token']}"}
+            )
+            userinfo_resp.raise_for_status()
+            profile = userinfo_resp.json()
+    except Exception as e:
+        logger.error(f"Google OAuth callback error: {e}")
+        return RedirectResponse(f"{FRONTEND_URL}/login")
+
+    ticket = uuid.uuid4().hex
+    await db.oauth_tickets.insert_one({
+        "ticket": ticket,
+        "email": profile["email"],
+        "name": profile.get("name", profile["email"]),
+        "picture": profile.get("picture"),
+        "created_at": datetime.now(timezone.utc).isoformat()
+    })
+
+    return RedirectResponse(f"{FRONTEND_URL}/dashboard#session_id={ticket}")
+
+
 @api_router.post("/auth/session")
 async def exchange_session(request: SessionExchangeRequest, response: Response):
     try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
-                headers={"X-Session-ID": request.session_id},
-                timeout=10.0
-            )
-            
-            if resp.status_code != 200:
-                raise HTTPException(status_code=401, detail="Invalid session ID")
-            
-            session_data = resp.json()
-        
+        ticket_doc = await db.oauth_tickets.find_one(
+            {"ticket": request.session_id}, {"_id": 0}
+        )
+        if not ticket_doc:
+            raise HTTPException(status_code=401, detail="Invalid session ID")
+        await db.oauth_tickets.delete_one({"ticket": request.session_id})
+
+        ticket_created_at = datetime.fromisoformat(ticket_doc["created_at"])
+        if (datetime.now(timezone.utc) - ticket_created_at).total_seconds() > OAUTH_TICKET_TTL_SECONDS:
+            raise HTTPException(status_code=401, detail="Session ID expired")
+
+        session_data = ticket_doc
+
         existing_user = await db.users.find_one(
             {"email": session_data["email"]},
             {"_id": 0}
         )
-        
+
         if existing_user:
             user_id = existing_user["user_id"]
             await db.users.update_one(
@@ -177,12 +268,12 @@ async def exchange_session(request: SessionExchangeRequest, response: Response):
                 "created_at": datetime.now(timezone.utc).isoformat()
             }
             await db.users.insert_one(user_doc)
-        
-        session_token = session_data["session_token"]
+
+        session_token = uuid.uuid4().hex
         expires_at = datetime.now(timezone.utc) + timedelta(days=7)
-        
+
         await db.user_sessions.delete_many({"user_id": user_id})
-        
+
         session_doc = {
             "session_token": session_token,
             "user_id": user_id,
@@ -190,7 +281,7 @@ async def exchange_session(request: SessionExchangeRequest, response: Response):
             "created_at": datetime.now(timezone.utc).isoformat()
         }
         await db.user_sessions.insert_one(session_doc)
-        
+
         response.set_cookie(
             key="session_token",
             value=session_token,
@@ -200,16 +291,14 @@ async def exchange_session(request: SessionExchangeRequest, response: Response):
             path="/",
             max_age=7*24*60*60
         )
-        
-        
+
+
         user_doc = await db.users.find_one({"user_id": user_id}, {"_id": 0})
         if isinstance(user_doc['created_at'], str):
             user_doc['created_at'] = datetime.fromisoformat(user_doc['created_at'])
-        
+
         return {"user": User(**user_doc).model_dump(mode='json'), "message": "Authentication successful"}
-    
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="Authentication service timeout")
+
     except HTTPException:
         raise
     except Exception as e:
@@ -263,156 +352,354 @@ async def generate_trip_plans(preferences: TripPreferences, request: Request):
     return {"trip_id": trip_id, "plans": plans}
 
 async def generate_single_plan(preferences: Dict, plan_type: str, trip_id: str, user_id: str) -> Dict:
-    """Generate a single vacation plan using AI"""
-    
+    """Generate a single vacation plan using AI with real price anchoring."""
+    import json
+
     currency = preferences.get('currency', 'INR')
     currency_symbol = '₹' if currency == 'INR' else '$'
-    budget_mode = preferences.get('budget_mode', True)
-    
-    budget_instructions = ""
-    if budget_mode:
-        budget_instructions = """
-**BUDGET OPTIMIZATION RULES (CRITICAL):**
-- Prioritize the MINIMUM possible cost for every recommendation
-- Suggest budget hostels, dormitories, homestays, or guesthouses (₹500-₹1500/night)
-- Recommend public transport: state buses, sleeper trains (3AC/SL), local metro, shared autos
-- Avoid private taxis unless absolutely necessary; prefer shared rides
-- Suggest free attractions (temples, beaches, parks, viewpoints) and skip expensive entry fees where possible
-- Recommend local street food and dhabas for meals (₹100-₹250 per meal)
-- For flights: only when train/bus would take 24+ hours, otherwise prefer rail
-- Cap daily expenditure to absolute minimum - aim for ₹2000-₹3500 per person/day
-- Clearly mark free activities with cost: 0
-- Distinguish FIXED costs (travel, accommodation) vs VARIABLE costs (food, activities)
+    num_travelers = preferences.get('num_travelers', 1)
+
+    # ── Step 1: Fetch real anchor prices ────────────────────────────────────
+    transport_mode = preferences.get("transportation", "flight").lower()
+    is_train = "train" in transport_mode
+
+    flight_price = 0
+    flight_airline = ""
+    flight_number = ""
+    flight_dep_time = ""
+    flight_arr_time = ""
+    flight_duration = ""
+    flight_stops = 0
+
+    train_price = 0
+    train_name = ""
+    train_number = ""
+    train_class = ""
+    train_duration = ""
+
+    hotel_name = ""
+    hotel_price_per_night = 0
+    hotel_stars = 0
+
+    if is_train:
+        train_tier_prices = {
+            "Budget":  {"price": 450,  "class": "Sleeper (SL)",      "name": "Express Train"},
+            "Premium": {"price": 1200, "class": "AC 3-Tier (3A)",    "name": "Superfast Express"},
+            "Luxury":  {"price": 2800, "class": "AC 1st Class (1A)", "name": "Rajdhani / Shatabdi"},
+        }
+        t = train_tier_prices.get(plan_type, train_tier_prices["Budget"])
+        train_price    = t["price"] * num_travelers
+        train_class    = t["class"]
+        train_name     = t["name"]
+        train_number   = "Train"
+        train_duration = "Varies by route"
+        logger.info(f"{plan_type}: estimated train = {train_name} {train_class} ₹{train_price:,.0f}")
+    else:
+        try:
+            flight_pref = {"Budget": "cheapest", "Premium": "direct", "Luxury": "fastest"}.get(plan_type, "cheapest")
+            af = await duffel_service.get_anchor_flight(
+                preferences.get("starting_location", ""),
+                preferences.get("destination", ""),
+                preferences.get("departure_date", ""),
+                travelers=num_travelers,
+                preference=flight_pref,
+            )
+            if af:
+                flight_price    = af['price']['total']
+                flight_airline  = af['airline']
+                flight_number   = af['flight_number']
+                flight_dep_time = af['departure']['time']
+                flight_arr_time = af['arrival']['time']
+                flight_duration = af['duration']
+                flight_stops    = af['stops']
+            logger.info(f"{plan_type}: anchor flight = {flight_airline} {flight_number} ₹{flight_price:,.0f}")
+        except Exception as e:
+            logger.warning(f"Anchor flight fetch failed for {plan_type}: {e}")
+
+    try:
+        hotel_results = await serpapi_hotels_service.search_hotels(
+            preferences.get("destination", ""),
+            preferences.get("departure_date", ""),
+            preferences.get("return_date", ""),
+            travelers=num_travelers,
+            currency="INR",
+        )
+        if hotel_results:
+            sorted_hotels = sorted(hotel_results, key=lambda h: h["price"]["per_night"])
+            if plan_type == "Budget":
+                ah = sorted_hotels[0]
+            elif plan_type == "Premium":
+                ah = sorted_hotels[len(sorted_hotels) // 2]
+            else:
+                ah = sorted_hotels[-1]
+            hotel_name           = ah['name']
+            hotel_price_per_night = ah['price']['per_night']
+            hotel_stars          = ah['stars']
+            logger.info(f"{plan_type}: anchor hotel = {hotel_name} ₹{hotel_price_per_night:,.0f}/night")
+    except Exception as e:
+        logger.warning(f"Anchor hotel fetch failed for {plan_type}: {e}")
+
+    # ── Step 2: Build tier-specific instructions ─────────────────────────────
+    tier_rules = {
+        "Budget": f"""
+- Cheapest available options throughout
+- Hotel: {hotel_name or 'budget guesthouse'} at EXACTLY ₹{hotel_price_per_night:,.0f}/night (use this hotel name and price)
+- Public transport (metro, bus, shared rides)
+- Street food and casual dining (₹150-400/meal)
+- Free or low-cost attractions
+- TOTAL trip cost must be the LOWEST of the three tiers
+""",
+        "Premium": f"""
+- Mid-range comfortable options
+- Hotel: {hotel_name or '4-star hotel'} at EXACTLY ₹{hotel_price_per_night:,.0f}/night (use this hotel name and price)
+- Mix of metro and private transport
+- Good restaurants (₹500-1200/meal)
+- Mix of free and paid attractions
+- TOTAL trip cost must be BETWEEN Budget and Luxury tiers
+""",
+        "Luxury": f"""
+- Premium luxury options only
+- Hotel: {hotel_name or '5-star luxury hotel'} at EXACTLY ₹{hotel_price_per_night:,.0f}/night (use this hotel name and price)
+- Private transfers and premium vehicles only
+- Fine dining at signature restaurants (₹1500+/meal)
+- Exclusive experiences, private tours, VIP access
+- TOTAL trip cost must be the HIGHEST of the three tiers
 """
-    
-    prompt = f"""You are an expert Indian travel planner specialized in BUDGET-CONSCIOUS itineraries. Create a detailed {plan_type} vacation plan based on these preferences:
+    }
 
-Destination: {preferences['destination']}
-Starting Location: {preferences['starting_location']}
-Dates: {preferences['departure_date']} to {preferences['return_date']}
-Travelers: {preferences['num_travelers']} ({preferences['adults']} adults, {preferences['children']} children, {preferences['seniors']} seniors)
-Transportation: {preferences['transportation']}
-Accommodation Preferences: {', '.join(preferences['accommodation']) if preferences['accommodation'] else 'Budget options'}
-Interests: {', '.join(preferences['interests']) if preferences['interests'] else 'General sightseeing'}
-Trip Type: {preferences['trip_type']}
-Currency: {currency} ({currency_symbol})
-{f"Dietary Preferences: {preferences['dietary_preferences']}" if preferences.get('dietary_preferences') else ""}
-{f"Accessibility: {preferences['accessibility_requirements']}" if preferences.get('accessibility_requirements') else ""}
+    # ── Step 3: Build the prompt with constraints at the TOP ─────────────────
+    if is_train:
+        flight_constraint = f"""TRAIN (DO NOT CHANGE THESE VALUES):
+  Train Name: {train_name}
+  Class: {train_class}
+  Duration: {train_duration}
+  PRICE: ₹{train_price:,.0f} total for {num_travelers} traveler(s) (USE THIS EXACT NUMBER)""" if train_price > 0 else "Use realistic Indian train prices."
+    else:
+        flight_constraint = f"""FLIGHT (DO NOT CHANGE THESE VALUES):
+  Airline: {flight_airline}
+  Flight Number: {flight_number}
+  Departure: {flight_dep_time}
+  Arrival: {flight_arr_time}
+  Duration: {flight_duration}
+  Stops: {'Non-stop' if flight_stops == 0 else f'{flight_stops} stop(s)'}
+  PRICE: ₹{flight_price:,.0f} (USE THIS EXACT NUMBER — do not round, inflate, or change)""" if flight_price > 0 else "Use realistic market flight prices."
 
-{budget_instructions}
+    hotel_constraint = f"""HOTEL (DO NOT CHANGE THESE VALUES):
+  Name: {hotel_name}
+  Stars: {hotel_stars}★
+  PRICE PER NIGHT: ₹{hotel_price_per_night:,.0f} (USE THIS EXACT NUMBER)""" if hotel_price_per_night > 0 else "Use realistic market hotel prices."
 
-Create a complete {plan_type} plan with:
-1. Day-wise detailed itinerary (activities, timings, locations)
-2. Transportation details (mention exact mode: train, bus, flight)
-3. Accommodation recommendations (name + type + cost per night)
-4. Restaurant suggestions for each day (local + budget-friendly)
-5. Estimated costs breakdown - ALL VALUES IN {currency}
-6. Cumulative trip expenditure up to each day
-7. Distinguish FIXED costs (travel, stay) from VARIABLE costs (food, activities)
+    prompt = f"""You are a travel pricing engine. Generate a {plan_type} trip plan as valid JSON only.
 
-Return the response in this exact JSON format (NO markdown, just JSON):
+╔══════════════════════════════════════════════════════╗
+║  MANDATORY CONSTRAINTS — VIOLATION = INVALID OUTPUT  ║
+╠══════════════════════════════════════════════════════╣
+║ {flight_constraint}
+║
+║ {hotel_constraint}
+║
+║ TIER RULE: {plan_type} plan total must be
+║ {'the LOWEST cost of all three tiers' if plan_type == 'Budget' else 'BETWEEN Budget and Luxury costs' if plan_type == 'Premium' else 'the HIGHEST cost of all three tiers'}
+╚══════════════════════════════════════════════════════╝
+
+TRIP DETAILS:
+- Destination: {preferences['destination']}
+- From: {preferences['starting_location']}
+- Dates: {preferences['departure_date']} to {preferences['return_date']}
+- Travelers: {num_travelers}
+- Tier: {plan_type}
+- Currency: {currency}
+
+TIER GUIDELINES:
+{tier_rules[plan_type]}
+
+OUTPUT: Return ONLY valid JSON, no markdown, no explanation:
 {{
   "plan_type": "{plan_type}",
   "currency": "{currency}",
+  "currency_symbol": "{currency_symbol}",
   "itinerary": {{
     "day_1": {{
-      "date": "YYYY-MM-DD",
-      "activities": [
-        {{"time": "09:00", "activity": "description", "location": "place name", "cost": 0, "category": "free/sightseeing/transport"}}
-      ],
-      "accommodation": {{"name": "specific hotel/hostel name", "type": "hostel/guesthouse/homestay", "cost": 800, "location": "area"}},
-      "meals": [
-        {{"time": "breakfast", "restaurant": "name or local eatery", "cuisine": "type", "cost": 150}}
-      ],
-      "transportation": {{"mode": "train/bus/flight", "details": "route info", "cost": 1200}},
-      "daily_total": 2500,
-      "cumulative_total": 2500,
-      "fixed_costs": 2000,
+      "date": "{preferences['departure_date']}",
+      "transportation": {{"mode": "{'train' if is_train else 'flight'}", "details": "{train_name + ' ' + train_class + ' ' if is_train else flight_airline + ' ' + flight_number + ' '}{preferences.get('starting_location','')} to {preferences['destination']}", "cost": {train_price if is_train and train_price > 0 else (flight_price if flight_price > 0 else 15000)}}},
+      "activities": [{{"time": "14:00", "activity": "Check-in and explore", "location": "Hotel", "cost": 0, "category": "free"}}],
+      "accommodation": {{"name": "{hotel_name or 'Hotel'}", "type": "hotel", "cost": {hotel_price_per_night if hotel_price_per_night > 0 else 5000}, "location": "{preferences['destination']}"}},
+      "meals": [{{"time": "dinner", "restaurant": "Local restaurant", "cuisine": "Local", "cost": 500}}],
+      "daily_total": {int((train_price if is_train else flight_price) + hotel_price_per_night + 500) if (train_price if is_train else flight_price) and hotel_price_per_night else 20000},
+      "cumulative_total": {int((train_price if is_train else flight_price) + hotel_price_per_night + 500) if (train_price if is_train else flight_price) and hotel_price_per_night else 20000},
+      "fixed_costs": {int((train_price if is_train else flight_price) + hotel_price_per_night) if (train_price if is_train else flight_price) and hotel_price_per_night else 18000},
       "variable_costs": 500
     }}
   }},
   "cost_breakdown": {{
-    "transportation": 0,
+    "transportation": {train_price if is_train and train_price > 0 else (flight_price if flight_price > 0 else 15000)},
     "accommodation": 0,
     "food": 0,
     "activities": 0,
     "miscellaneous": 0
   }},
   "total_cost": 0,
-  "currency_symbol": "{currency_symbol}",
   "highlights": ["highlight 1", "highlight 2", "highlight 3"],
   "budget_tips": ["tip 1", "tip 2", "tip 3"]
 }}
 
-Provide REALISTIC Indian market prices in {currency}. Be specific with restaurant/hotel names. Generate one day for each day of the trip duration."""
-    
-    try:
-        chat = LlmChat(
-            api_key=EMERGENT_LLM_KEY,
-            session_id=f"{trip_id}_{plan_type}",
-            system_message=f"You are an expert Indian travel planner. Always provide detailed, practical, and budget-conscious travel plans in valid JSON format with all costs in {currency}."
-        ).with_model("openai", "gpt-4o")
-        
+Fill in ALL days from {preferences['departure_date']} to {preferences['return_date']}.
+Use EXACT prices from constraints above — especially ₹{train_price if is_train else flight_price:,.0f} for {'train' if is_train else 'flight'} and ₹{hotel_price_per_night:,.0f}/night for hotel.
+Generate realistic activities, meals, and local transport for each day."""
+
+    # ── Step 4: Call LLM (with one retry on failure) ─────────────────────────
+    last_error = None
+    for attempt in range(2):
+      try:
+        if attempt > 0:
+            logger.warning(f"Retrying {plan_type} plan generation (attempt {attempt + 1})...")
+        system_message = (
+            f"You are a travel cost calculator that outputs ONLY valid JSON. "
+            f"You ALWAYS use the exact prices provided in the MANDATORY CONSTRAINTS section. "
+            f"{'Train' if is_train else 'Flight'} transport cost MUST be ₹{(train_price if is_train else flight_price):,.0f}. "
+            f"Hotel cost MUST be ₹{hotel_price_per_night:,.0f}/night. "
+            f"Never invent or change these numbers."
+        )
+
+        stream = await gemini_client.aio.models.generate_content_stream(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config=genai_types.GenerateContentConfig(
+                system_instruction=system_message,
+            ),
+        )
+
         full_response = ""
-        async for event in chat.stream_message(UserMessage(text=prompt)):
-            if isinstance(event, TextDelta):
-                full_response += event.content
-            elif isinstance(event, StreamDone):
-                break
-        
-        # Parse JSON from response
-        import json
-        # Extract JSON from response (in case there's extra text)
-        start_idx = full_response.find('{')
-        end_idx = full_response.rfind('}') + 1
-        if start_idx != -1 and end_idx > start_idx:
-            json_str = full_response[start_idx:end_idx]
-            plan_data = json.loads(json_str)
+        async for chunk in stream:
+            if chunk.text:
+                full_response += chunk.text
+
+        # Parse JSON
+        start_i = full_response.find('{')
+        end_i   = full_response.rfind('}') + 1
+        if start_i != -1 and end_i > start_i:
+            plan_data = json.loads(full_response[start_i:end_i])
         else:
-            # Fallback structure if parsing fails
-            plan_data = {
-                "plan_type": plan_type,
-                "currency": currency,
-                "currency_symbol": currency_symbol,
-                "itinerary": {},
-                "cost_breakdown": {
-                    "transportation": 0,
-                    "accommodation": 0,
-                    "food": 0,
-                    "activities": 0,
-                    "miscellaneous": 0
-                },
-                "total_cost": 0,
-                "highlights": [],
-                "budget_tips": []
-            }
-        
-        # Ensure currency fields exist
+            raise ValueError("No JSON found in response")
+
+        # ── Step 5: Post-process — enforce exact prices regardless of AI output
+        logger.info(f"{plan_type}: flight_price={flight_price}, hotel_price={hotel_price_per_night}")
+        logger.info(f"{plan_type}: AI day_1 transport cost before fix = {plan_data.get('itinerary', {}).get('day_1', {}).get('transportation', {}).get('cost', 'N/A')}")
+        anchor_transport_price = train_price if is_train else flight_price
+        anchor_transport_label = "train" if is_train else "flight"
+
+        if anchor_transport_price > 0:
+            if 'cost_breakdown' in plan_data:
+                plan_data['cost_breakdown']['transportation'] = anchor_transport_price
+
+            itinerary = plan_data.get('itinerary', {})
+            days = sorted(itinerary.keys())
+
+            if days:
+                # Day 1: outbound transport
+                d1 = itinerary[days[0]]
+                if 'transportation' in d1:
+                    d1['transportation']['cost'] = anchor_transport_price
+                    d1['transportation']['mode'] = anchor_transport_label
+                    if is_train:
+                        d1['transportation']['details'] = f"{train_name} ({train_class}) - {preferences.get('starting_location','')} to {preferences['destination']}"
+                    else:
+                        d1['transportation']['details'] = f"{flight_airline} {flight_number} - {d1['transportation'].get('details', '')}"
+                for act in d1.get('activities', []):
+                    kw = anchor_transport_label
+                    if kw in act.get('activity', '').lower() or 'depart' in act.get('activity', '').lower():
+                        act['cost'] = anchor_transport_price
+
+                # Last day: always force return transport to match outbound
+                if len(days) > 1:
+                    dl = itinerary[days[-1]]
+                    if 'transportation' not in dl:
+                        dl['transportation'] = {}
+                    dl['transportation']['cost'] = anchor_transport_price
+                    dl['transportation']['mode'] = anchor_transport_label
+                    if is_train:
+                        dl['transportation']['details'] = f"{train_name} ({train_class}) - {preferences['destination']} to {preferences.get('starting_location','')}"
+                    else:
+                        dl['transportation']['details'] = f"Return {flight_airline} {flight_number} - {preferences['destination']} to {preferences.get('starting_location','')}"
+
+        if hotel_price_per_night > 0:
+            itinerary = plan_data.get('itinerary', {})
+            for day_key, day_data in itinerary.items():
+                if 'accommodation' in day_data and isinstance(day_data['accommodation'], dict):
+                    day_data['accommodation']['cost'] = hotel_price_per_night
+                    day_data['accommodation']['name'] = hotel_name or day_data['accommodation'].get('name', 'Hotel')
+
+        # Recalculate per-day totals AND the top-level cost_breakdown/total_cost from
+        # the same pass over the (now anchor-corrected) itinerary, so the two can never
+        # drift apart the way AI-authored daily_total/cumulative_total can.
+        itinerary = plan_data.get('itinerary', {})
+        day_keys_sorted = sorted(itinerary.keys())
+
+        real_transport = 0
+        real_accommodation = 0
+        real_food = 0
+        real_activities = 0
+        running_cumulative = 0
+
+        for day_key in day_keys_sorted:
+            day_data = itinerary[day_key]
+
+            t = day_data.get('transportation', {})
+            day_transport = t.get('cost', 0) if isinstance(t, dict) else 0
+
+            a = day_data.get('accommodation', {})
+            day_accommodation = a.get('cost', 0) if isinstance(a, dict) else 0
+
+            day_food = sum(meal.get('cost', 0) for meal in day_data.get('meals', []))
+            day_activities = sum(act.get('cost', 0) for act in day_data.get('activities', []))
+
+            day_fixed = day_transport + day_accommodation
+            day_variable = day_food + day_activities
+
+            day_data['fixed_costs'] = day_fixed
+            day_data['variable_costs'] = day_variable
+            day_data['daily_total'] = day_fixed + day_variable
+
+            running_cumulative += day_data['daily_total']
+            day_data['cumulative_total'] = running_cumulative
+
+            real_transport += day_transport
+            real_accommodation += day_accommodation
+            real_food += day_food
+            real_activities += day_activities
+
+        plan_data['cost_breakdown'] = {
+            'transportation': real_transport,
+            'accommodation': real_accommodation,
+            'food': real_food,
+            'activities': real_activities,
+            'miscellaneous': 0,
+        }
+        plan_data['total_cost'] = running_cumulative
+        logger.info(f"{plan_type}: day_1 transport cost AFTER fix = {plan_data.get('itinerary', {}).get('day_1', {}).get('transportation', {}).get('cost', 'N/A')}")
+        logger.info(f"{plan_type}: recalculated total = {plan_data['total_cost']}")
+
         plan_data.setdefault('currency', currency)
         plan_data.setdefault('currency_symbol', currency_symbol)
-        
         return plan_data
-    
-    except Exception as e:
-        logger.error(f"Error generating {plan_type} plan: {e}")
-        # Return fallback plan
-        return {
-            "plan_type": plan_type,
-            "currency": currency,
-            "currency_symbol": currency_symbol,
-            "itinerary": {},
-            "cost_breakdown": {
-                "transportation": 0,
-                "accommodation": 0,
-                "food": 0,
-                "activities": 0,
-                "miscellaneous": 0
-            },
-            "total_cost": 0,
-            "highlights": [],
-            "budget_tips": [],
-            "error": str(e)
-        }
+
+      except Exception as e:
+            last_error = e
+            logger.warning(f"Attempt {attempt + 1} failed for {plan_type} plan: {e}")
+
+    logger.error(f"All attempts failed for {plan_type} plan: {last_error}")
+    return {
+        "plan_type": plan_type,
+        "currency": currency,
+        "currency_symbol": currency_symbol,
+        "itinerary": {},
+        "cost_breakdown": {"transportation": 0, "accommodation": 0, "food": 0, "activities": 0, "miscellaneous": 0},
+        "total_cost": 0,
+        "highlights": [],
+        "budget_tips": [],
+        "error": str(last_error)
+    }
+
 
 @api_router.get("/trips")
 async def get_user_trips(request: Request):
@@ -469,18 +756,18 @@ async def chat_stream(chat_msg: ChatMessage, request: Request):
     
     async def event_generator():
         try:
-            chat = LlmChat(
-                api_key=EMERGENT_LLM_KEY,
-                session_id=f"{user.user_id}_chat",
-                system_message=system_message
-            ).with_model("openai", "gpt-4o")
-            
-            async for event in chat.stream_message(UserMessage(text=chat_msg.message)):
-                if isinstance(event, TextDelta):
-                    yield f"data: {event.content}\n\n"
-                elif isinstance(event, StreamDone):
-                    yield "data: [DONE]\n\n"
-                    break
+            stream = await gemini_client.aio.models.generate_content_stream(
+                model=GEMINI_MODEL,
+                contents=chat_msg.message,
+                config=genai_types.GenerateContentConfig(
+                    system_instruction=system_message,
+                ),
+            )
+
+            async for chunk in stream:
+                if chunk.text:
+                    yield f"data: {chunk.text}\n\n"
+            yield "data: [DONE]\n\n"
         except Exception as e:
             logger.error(f"Chat stream error: {e}")
             yield f"data: Error: {str(e)}\n\n"
@@ -528,18 +815,53 @@ class BookingRequest(BaseModel):
 @api_router.post("/search/flights")
 async def search_flights_endpoint(req: FlightSearchRequest, request: Request):
     await get_current_user(request)
-    flights = await amadeus_service.search_flights(
+    # Try Duffel (real data) first, fall back to mock
+    flights = await duffel_service.search_flights(
         req.origin, req.destination, req.departure_date, req.return_date, req.travelers
     )
+    if not flights:
+        logger.warning("Duffel returned no flights, falling back to mock data")
+        flights = amadeus_service._generate_mock_flights(
+            req.origin, req.destination, req.departure_date,
+            req.return_date or req.departure_date, req.travelers
+        )
+    # Sort: cheapest first
+    flights = sorted(flights, key=lambda f: f["price"]["total"])
     return {"flights": flights, "count": len(flights)}
+
+class TrainSearchRequest(BaseModel):
+    origin: str
+    destination: str
+    departure_date: str
+    travelers: int = 1
+
+@api_router.post("/search/trains")
+async def search_trains_endpoint(req: TrainSearchRequest, request: Request):
+    await get_current_user(request)
+    # Live train API not yet integrated. Return empty list with honest message.
+    # Frontend should show "Train data unavailable for this route" when count == 0.
+    return {
+        "trains": [],
+        "count": 0,
+        "message": "Live train data is not available for this route. Please check IRCTC or Rome2rio for train options."
+    }
+
 
 
 @api_router.post("/search/hotels")
 async def search_hotels_endpoint(req: HotelSearchRequest, request: Request):
     await get_current_user(request)
-    hotels = await amadeus_service.search_hotels(
-        req.destination, req.check_in, req.check_out, req.travelers
+    # Try SerpApi (real data) first, fall back to mock
+    hotels = await serpapi_hotels_service.search_hotels(
+        req.destination, req.check_in, req.check_out, req.travelers, currency="INR"
     )
+    if not hotels:
+        logger.warning("SerpApi returned no hotels, falling back to mock data")
+        hotels = amadeus_service._generate_mock_hotels(
+            req.destination, req.check_in, req.check_out, req.travelers
+        )
+    # Enforce tier ordering: always sort by price ascending
+    hotels = sorted(hotels, key=lambda h: h["price"]["per_night"])
     return {"hotels": hotels, "count": len(hotels)}
 
 
@@ -664,7 +986,7 @@ async def upload_wallet_item(
         raise HTTPException(status_code=413, detail="File too large (max 10MB)")
     
     try:
-        result = storage_service.put_object(storage_path, data, content_type)
+        result = await storage_service.put_object(storage_path, data, content_type)
     except Exception as e:
         logger.error(f"Storage upload error: {e}")
         raise HTTPException(status_code=500, detail="File upload failed")
@@ -731,7 +1053,7 @@ async def download_wallet_item(item_id: str, request: Request, auth: Optional[st
         raise HTTPException(status_code=404, detail="Item not found")
     
     try:
-        data, content_type = storage_service.get_object(item["file_path"])
+        data, content_type = await storage_service.get_object(item["file_path"])
     except Exception as e:
         logger.error(f"Storage download error: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve file")
@@ -800,13 +1122,9 @@ class CheckoutStatusRequest(BaseModel):
     session_id: str
 
 
-def _get_stripe_client(request: Request) -> StripeCheckout:
-    api_key = os.environ.get('STRIPE_API_KEY')
-    if not api_key:
+def _ensure_stripe_configured():
+    if not stripe.api_key:
         raise HTTPException(status_code=500, detail="Stripe not configured")
-    host_url = str(request.base_url).rstrip('/')
-    webhook_url = f"{host_url}/api/webhook/stripe"
-    return StripeCheckout(api_key=api_key, webhook_url=webhook_url)
 
 
 @api_router.post("/payments/checkout")
@@ -863,19 +1181,27 @@ async def create_checkout(req: CreateCheckoutRequest, request: Request):
     success_url = f"{origin}/payment-success?session_id={{CHECKOUT_SESSION_ID}}"
     cancel_url = f"{origin}/payment-cancel"
     
-    stripe_client = _get_stripe_client(request)
-    checkout_request = CheckoutSessionRequest(
-        amount=amount,
-        currency=currency,
+    _ensure_stripe_configured()
+    session = await asyncio.to_thread(
+        stripe.checkout.Session.create,
+        mode='payment',
+        payment_method_types=['card'],
+        line_items=[{
+            'price_data': {
+                'currency': currency,
+                'product_data': {'name': description},
+                'unit_amount': int(round(amount * 100)),
+            },
+            'quantity': 1,
+        }],
         success_url=success_url,
         cancel_url=cancel_url,
         metadata=metadata,
     )
-    session = await stripe_client.create_checkout_session(checkout_request)
-    
+
     # Store transaction
     transaction = {
-        'session_id': session.session_id,
+        'session_id': session.id,
         'user_id': user.user_id,
         'amount': amount,
         'currency': currency,
@@ -891,7 +1217,7 @@ async def create_checkout(req: CreateCheckoutRequest, request: Request):
     
     return {
         'url': session.url,
-        'session_id': session.session_id,
+        'session_id': session.id,
         'amount': amount,
         'currency': currency,
     }
@@ -920,9 +1246,9 @@ async def get_payment_status(session_id: str, request: Request):
         }
     
     # Poll Stripe
-    stripe_client = _get_stripe_client(request)
-    status_response = await stripe_client.get_checkout_status(session_id)
-    
+    _ensure_stripe_configured()
+    status_response = await asyncio.to_thread(stripe.checkout.Session.retrieve, session_id)
+
     # Update transaction (idempotent - only process once)
     if status_response.payment_status == 'paid' and transaction['payment_status'] != 'paid':
         await db.payment_transactions.update_one(
@@ -1010,19 +1336,23 @@ async def stripe_webhook(request: Request):
     """Handle Stripe webhook events."""
     body = await request.body()
     signature = request.headers.get('Stripe-Signature', '')
-    
+    webhook_secret = os.environ.get('STRIPE_WEBHOOK_SECRET')
+
     try:
-        stripe_client = _get_stripe_client(request)
-        webhook_response = await stripe_client.handle_webhook(body, signature)
-        
-        if webhook_response.event_type == 'checkout.session.completed':
+        _ensure_stripe_configured()
+        if not webhook_secret:
+            raise HTTPException(status_code=500, detail="Stripe webhook secret not configured")
+        event = stripe.Webhook.construct_event(body, signature, webhook_secret)
+
+        if event['type'] == 'checkout.session.completed':
+            session_obj = event['data']['object']
             transaction = await db.payment_transactions.find_one(
-                {'session_id': webhook_response.session_id},
+                {'session_id': session_obj['id']},
                 {'_id': 0}
             )
             if transaction and transaction['payment_status'] != 'paid':
                 await db.payment_transactions.update_one(
-                    {'session_id': webhook_response.session_id},
+                    {'session_id': session_obj['id']},
                     {'$set': {
                         'payment_status': 'paid',
                         'status': 'completed',
@@ -1030,8 +1360,10 @@ async def stripe_webhook(request: Request):
                     }}
                 )
                 await _process_successful_payment(transaction)
-        
+
         return {"received": True}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Webhook error: {e}")
         # Return non-2xx so Stripe retries the webhook

@@ -14,7 +14,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 
 BASE_URL = os.environ.get(
     'REACT_APP_BACKEND_URL',
-    'https://ai-vacation-planner-1.preview.emergentagent.com'
+    'http://localhost:8001'
 ).rstrip('/')
 SESSION_TOKEN = os.environ.get('TEST_SESSION_TOKEN', 'test_session_eyv_1780670554293')
 USER_ID = "test-user-eyv-1780670554293"

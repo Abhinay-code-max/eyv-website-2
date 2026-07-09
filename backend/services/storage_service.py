@@ -1,79 +1,49 @@
 """
-Emergent Object Storage Service for Travel Wallet
+GridFS Object Storage Service for Travel Wallet
 """
 import os
 import uuid
 import logging
-import requests
 from typing import Tuple, Optional
+
+from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorGridFSBucket
 
 logger = logging.getLogger(__name__)
 
-STORAGE_URL = "https://integrations.emergentagent.com/objstore/api/v1/storage"
 APP_NAME = "eyv-travel"
 
-_storage_key = None
+_bucket: Optional[AsyncIOMotorGridFSBucket] = None
 
 
-def _get_emergent_key():
-    return os.environ.get("EMERGENT_LLM_KEY")
+def _get_bucket() -> AsyncIOMotorGridFSBucket:
+    global _bucket
+    if _bucket is None:
+        mongo_url = os.environ['MONGO_URL']
+        db_name = os.environ['DB_NAME']
+        client = AsyncIOMotorClient(mongo_url)
+        _bucket = AsyncIOMotorGridFSBucket(client[db_name], bucket_name="wallet_files")
+    return _bucket
 
 
-def init_storage() -> Optional[str]:
-    """Initialize storage. Returns storage_key."""
-    global _storage_key
-    if _storage_key:
-        return _storage_key
-    
-    emergent_key = _get_emergent_key()
-    if not emergent_key:
-        logger.error("EMERGENT_LLM_KEY not set")
-        return None
-    
-    try:
-        resp = requests.post(
-            f"{STORAGE_URL}/init",
-            json={"emergent_key": emergent_key},
-            timeout=30
-        )
-        resp.raise_for_status()
-        _storage_key = resp.json()["storage_key"]
-        logger.info("Storage initialized successfully")
-        return _storage_key
-    except Exception as e:
-        logger.error(f"Storage init failed: {e}")
-        return None
+def init_storage() -> None:
+    """Initialize the storage backend. Kept for interface compatibility."""
+    _get_bucket()
 
 
-def put_object(path: str, data: bytes, content_type: str) -> dict:
-    """Upload file. Returns {"path": "...", "size": 123, "etag": "..."}"""
-    key = init_storage()
-    if not key:
-        raise Exception("Storage not initialized")
-    
-    resp = requests.put(
-        f"{STORAGE_URL}/objects/{path}",
-        headers={"X-Storage-Key": key, "Content-Type": content_type},
-        data=data,
-        timeout=120
-    )
-    resp.raise_for_status()
-    return resp.json()
+async def put_object(path: str, data: bytes, content_type: str) -> dict:
+    """Upload file. Returns {"path": "...", "size": 123}"""
+    bucket = _get_bucket()
+    await bucket.upload_from_stream(path, data, metadata={"content_type": content_type})
+    return {"path": path, "size": len(data)}
 
 
-def get_object(path: str) -> Tuple[bytes, str]:
+async def get_object(path: str) -> Tuple[bytes, str]:
     """Download file. Returns (content_bytes, content_type)."""
-    key = init_storage()
-    if not key:
-        raise Exception("Storage not initialized")
-    
-    resp = requests.get(
-        f"{STORAGE_URL}/objects/{path}",
-        headers={"X-Storage-Key": key},
-        timeout=60
-    )
-    resp.raise_for_status()
-    return resp.content, resp.headers.get("Content-Type", "application/octet-stream")
+    bucket = _get_bucket()
+    grid_out = await bucket.open_download_stream_by_name(path)
+    data = await grid_out.read()
+    content_type = (grid_out.metadata or {}).get("content_type", "application/octet-stream")
+    return data, content_type
 
 
 def build_path(user_id: str, file_ext: str) -> str:

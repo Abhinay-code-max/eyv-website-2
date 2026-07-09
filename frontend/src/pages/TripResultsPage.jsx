@@ -1,15 +1,153 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import axios from 'axios';
-import { motion } from 'framer-motion';
-import { ArrowLeft, DollarSign, Plane, Hotel, Utensils, Activity, Calendar, MapPin, Check } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
+import {
+  ArrowLeft, DollarSign, Plane, Hotel, Utensils, Activity,
+  Calendar, MapPin, Check, ChevronDown, ChevronUp, Sparkles,
+} from 'lucide-react';
 import { API_URL } from '../constants';
 import { TRIP_PLANNER } from '../constants/testIds';
-import LoadingAnimation from '../components/LoadingAnimation';
+import TripLoadingScreen from '../components/TripLoadingScreen';
 import { Button } from '../components/ui/button';
 import EYVLogo from '../components/EYVLogo';
 import TripMap from '../components/TripMap';
 
+/* ─── plan colour config ─────────────────────────────────────────── */
+const PLAN_STYLES = {
+  Budget:  { ring: 'border-[#2A7D4F]',  bg: 'bg-[#F0FBF4]',  accent: '#2A7D4F',  badge: 'bg-[#D1FAE5] text-[#065F46]' },
+  Premium: { ring: 'border-[#C47245]',  bg: 'bg-[#FDF6F0]',  accent: '#C47245',  badge: 'bg-[#FEE2C8] text-[#7C2D12]' },
+  Luxury:  { ring: 'border-[#7C5CBF]',  bg: 'bg-[#FAF6FF]',  accent: '#7C5CBF',  badge: 'bg-[#EDE9FE] text-[#4C1D95]' },
+};
+const planStyle = (type) => PLAN_STYLES[type] || PLAN_STYLES.Premium;
+
+/* ─── collapsible day card ───────────────────────────────────────── */
+const DayCard = ({ day, details, formatCost, accent }) => {
+  const [open, setOpen] = useState(true);
+  return (
+    <div className="rounded-2xl border border-[#E7E5E4] overflow-hidden">
+      <button
+        onClick={() => setOpen(v => !v)}
+        className="w-full flex items-center justify-between px-6 py-4 bg-[#F5F2EB] hover:bg-[#EDE9E0] transition-colors"
+      >
+        <div className="flex items-baseline gap-3">
+          <h4 className="text-lg font-semibold text-[#1C1917]"
+            style={{ fontFamily: 'Cormorant Garamond, serif' }}>
+            {day.replace('_', ' ').toUpperCase()}
+            {details.date && ` — ${details.date}`}
+          </h4>
+          {details.daily_total != null && (
+            <span className="text-sm font-medium" style={{ color: accent }}>
+              {formatCost(details.daily_total)}
+            </span>
+          )}
+        </div>
+        {open ? <ChevronUp size={18} className="text-[#57534E]" /> : <ChevronDown size={18} className="text-[#57534E]" />}
+      </button>
+
+      <AnimatePresence initial={false}>
+        {open && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.3 }}
+            className="overflow-hidden"
+          >
+            <div className="px-6 py-5 space-y-5">
+              {/* Transportation */}
+              {details.transportation && (
+                <div>
+                  <div className="flex items-center gap-2 mb-2" style={{ color: accent }}>
+                    <Plane size={16} />
+                    <span className="text-sm font-semibold uppercase tracking-wider">Transportation</span>
+                  </div>
+                  <p className="text-sm text-[#57534E] ml-6">
+                    <span className="font-medium capitalize">{details.transportation.mode}:</span>{' '}
+                    {details.transportation.details}
+                    {details.transportation.cost != null && (
+                      <span className="font-medium" style={{ color: accent }}> — {formatCost(details.transportation.cost)}</span>
+                    )}
+                  </p>
+                </div>
+              )}
+
+              {/* Activities */}
+              {details.activities?.length > 0 && (
+                <div>
+                  <div className="flex items-center gap-2 mb-2" style={{ color: accent }}>
+                    <Activity size={16} />
+                    <span className="text-sm font-semibold uppercase tracking-wider">Activities</span>
+                  </div>
+                  <div className="space-y-1.5 ml-6">
+                    {details.activities.map((a, i) => (
+                      <p key={i} className="text-sm text-[#57534E]">
+                        <span className="font-medium">{a.time}:</span> {a.activity}
+                        {a.location && ` at ${a.location}`}
+                        {a.cost != null && (
+                          <span className="font-medium" style={{ color: accent }}>
+                            {' '}— {a.cost === 0 ? 'Free' : formatCost(a.cost)}
+                          </span>
+                        )}
+                      </p>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Accommodation */}
+              {details.accommodation && (
+                <div>
+                  <div className="flex items-center gap-2 mb-2" style={{ color: accent }}>
+                    <Hotel size={16} />
+                    <span className="text-sm font-semibold uppercase tracking-wider">Accommodation</span>
+                  </div>
+                  <p className="text-sm text-[#57534E] ml-6">
+                    {details.accommodation.name} ({details.accommodation.type})
+                    {details.accommodation.cost != null && (
+                      <span className="font-medium" style={{ color: accent }}> — {formatCost(details.accommodation.cost)}</span>
+                    )}
+                  </p>
+                </div>
+              )}
+
+              {/* Meals */}
+              {details.meals?.length > 0 && (
+                <div>
+                  <div className="flex items-center gap-2 mb-2" style={{ color: accent }}>
+                    <Utensils size={16} />
+                    <span className="text-sm font-semibold uppercase tracking-wider">Meals</span>
+                  </div>
+                  <div className="space-y-1.5 ml-6">
+                    {details.meals.map((m, i) => (
+                      <p key={i} className="text-sm text-[#57534E]">
+                        <span className="font-medium capitalize">{m.time}:</span> {m.restaurant}
+                        {m.cuisine && ` (${m.cuisine})`}
+                        {m.cost != null && (
+                          <span className="font-medium" style={{ color: accent }}> — {formatCost(m.cost)}</span>
+                        )}
+                      </p>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Cumulative total */}
+              {details.cumulative_total != null && (
+                <div className="pt-3 border-t border-[#E7E5E4] flex justify-between text-sm text-[#57534E]">
+                  <span>Cumulative trip total</span>
+                  <span className="font-medium" style={{ color: accent }}>{formatCost(details.cumulative_total)}</span>
+                </div>
+              )}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+};
+
+/* ─── Page ───────────────────────────────────────────────────────── */
 const TripResultsPage = () => {
   const { tripId } = useParams();
   const navigate = useNavigate();
@@ -19,9 +157,7 @@ const TripResultsPage = () => {
   const [mapCenter, setMapCenter] = useState(null);
   const [mapMarkers, setMapMarkers] = useState([]);
 
-  useEffect(() => {
-    fetchTrip();
-  }, [tripId]);
+  useEffect(() => { fetchTrip(); }, [tripId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (trip?.preferences?.destination) {
@@ -29,6 +165,7 @@ const TripResultsPage = () => {
     }
   }, [trip]);
 
+  /* ── API calls — preserved verbatim ── */
   const fetchDestinationCoords = async (destination) => {
     try {
       const response = await axios.get(
@@ -37,14 +174,7 @@ const TripResultsPage = () => {
       );
       const { lat, lng } = response.data;
       setMapCenter([lat, lng]);
-      setMapMarkers([
-        {
-          lat,
-          lng,
-          title: destination,
-          description: 'Your destination',
-        },
-      ]);
+      setMapMarkers([{ lat, lng, title: destination, description: 'Your destination' }]);
     } catch (error) {
       console.error('Coords fetch error:', error);
     }
@@ -52,9 +182,7 @@ const TripResultsPage = () => {
 
   const fetchTrip = async () => {
     try {
-      const response = await axios.get(`${API_URL}/trips/${tripId}`, {
-        withCredentials: true,
-      });
+      const response = await axios.get(`${API_URL}/trips/${tripId}`, { withCredentials: true });
       setTrip(response.data);
       setSelectedPlan(response.data.plans[1]); // Default to Premium
     } catch (error) {
@@ -64,264 +192,222 @@ const TripResultsPage = () => {
     }
   };
 
-  if (loading) return <LoadingAnimation />;
-  if (!trip) return <div className="min-h-screen flex items-center justify-center">Trip not found</div>;
+  /* ── loading state — cinematic screen ── */
+  if (loading) {
+    return (
+      <TripLoadingScreen
+        destination={trip?.preferences?.destination || 'your destination'}
+      />
+    );
+  }
 
-  const getPlanColor = (planType) => {
-    if (planType === 'Budget') return 'border-[#86A8B3] bg-[#86A8B3]/10';
-    if (planType === 'Premium') return 'border-[#C47245] bg-[#C47245]/10';
-    return 'border-[#E8B273] bg-[#E8B273]/10';
-  };
+  if (!trip) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-[#FDFBF7]">
+        <div className="text-center">
+          <p className="text-xl text-[#57534E] mb-4">Trip not found</p>
+          <Button onClick={() => navigate('/dashboard')} className="bg-[#C47245] hover:bg-[#A85D38]">
+            Back to Dashboard
+          </Button>
+        </div>
+      </div>
+    );
+  }
 
+  const ps = planStyle(selectedPlan?.plan_type);
   const currencySymbol = selectedPlan?.currency_symbol || (selectedPlan?.currency === 'INR' ? '₹' : '$');
   const formatCost = (val) => `${currencySymbol}${(val ?? 0).toLocaleString()}`;
 
   return (
-    <div className="min-h-screen bg-[#FDFBF7]">
-      {/* Header */}
-      <div className="sticky top-0 z-50 glass border-b border-[#E7E5E4]">
+    <div data-testid={TRIP_PLANNER.plannerForm} className="min-h-screen bg-[#FDFBF7]">
+
+      {/* ── Header ── */}
+      <div className="sticky top-0 z-50 bg-[#FDFBF7]/80 backdrop-blur-xl border-b border-[#E7E5E4] shadow-sm">
         <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
-          <Button
-            onClick={() => navigate('/dashboard')}
-            variant="ghost"
-            className="text-[#57534E]"
-          >
-            <ArrowLeft size={20} />
-            Back to Dashboard
+          <Button onClick={() => navigate('/dashboard')} variant="ghost"
+            className="text-[#57534E] hover:text-[#C47245] gap-2">
+            <ArrowLeft size={18} /> Back to Dashboard
           </Button>
           <EYVLogo size="small" />
         </div>
       </div>
 
       <div className="max-w-7xl mx-auto px-6 py-12">
-        {/* Trip Header */}
-        <div className="mb-12">
-          <h1 className="text-5xl font-semibold text-[#1C1917] mb-4" style={{ fontFamily: 'Cormorant Garamond, serif' }}>
+
+        {/* ── Trip header ── */}
+        <motion.div className="mb-12"
+          initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.6 }}>
+          <span className="text-xs uppercase tracking-[0.25em] font-medium text-[#C47245]">Your Trip</span>
+          <h1 className="text-5xl md:text-6xl font-semibold text-[#1C1917] mt-2 mb-4 leading-tight"
+            style={{ fontFamily: 'Cormorant Garamond, serif' }}>
             {trip.trip_name}
           </h1>
-          <div className="flex flex-wrap items-center gap-4 text-[#57534E]">
+          <div className="flex flex-wrap items-center gap-5 text-[#57534E]">
             <div className="flex items-center gap-2">
-              <MapPin size={18} />
+              <MapPin size={17} className="text-[#C47245]" />
               <span>{trip.preferences.destination}</span>
             </div>
             <div className="flex items-center gap-2">
-              <Calendar size={18} />
-              <span>{trip.preferences.departure_date} to {trip.preferences.return_date}</span>
+              <Calendar size={17} className="text-[#C47245]" />
+              <span>{trip.preferences.departure_date} → {trip.preferences.return_date}</span>
             </div>
           </div>
-        </div>
+        </motion.div>
 
-        {/* Plan Selection */}
-        <div className="mb-12">
-          <h2 className="text-3xl font-medium text-[#2A4B5C] mb-6" style={{ fontFamily: 'Cormorant Garamond, serif' }}>
+        {/* ── Plan selection ── */}
+        <motion.div className="mb-12"
+          initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.6, delay: 0.1 }}>
+          <h2 className="text-3xl font-medium text-[#2A4B5C] mb-6"
+            style={{ fontFamily: 'Cormorant Garamond, serif' }}>
             Choose Your Plan
           </h2>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-            {trip.plans.map((plan, idx) => (
-              <motion.div
-                key={idx}
-                data-testid={`${plan.plan_type.toLowerCase()}-plan-card`}
-                onClick={() => setSelectedPlan(plan)}
-                className={`relative p-6 rounded-2xl border-2 cursor-pointer transition-all hover:shadow-xl ${
-                  selectedPlan?.plan_type === plan.plan_type ? getPlanColor(plan.plan_type) : 'border-[#E7E5E4]'
-                }`}
-                whileHover={{ y: -5 }}
-              >
-                {selectedPlan?.plan_type === plan.plan_type && (
-                  <div className="absolute -top-3 -right-3 bg-[#C47245] text-white rounded-full p-2">
-                    <Check size={20} />
+            {trip.plans.map((plan, idx) => {
+              const style = planStyle(plan.plan_type);
+              const active = selectedPlan?.plan_type === plan.plan_type;
+              return (
+                <motion.div
+                  key={idx}
+                  data-testid={`${plan.plan_type.toLowerCase()}-plan-card`}
+                  onClick={() => setSelectedPlan(plan)}
+                  className={`relative p-6 rounded-2xl border-2 cursor-pointer transition-all hover:shadow-xl ${
+                    active ? `${style.ring} ${style.bg}` : 'border-[#E7E5E4] hover:border-[#C47245]/30'
+                  }`}
+                  whileHover={{ y: -5 }}
+                >
+                  {active && (
+                    <motion.div
+                      layoutId="plan-check"
+                      className="absolute -top-3 -right-3 text-white rounded-full p-1.5"
+                      style={{ background: style.accent }}
+                    >
+                      <Check size={18} />
+                    </motion.div>
+                  )}
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="text-2xl font-medium text-[#1C1917]"
+                      style={{ fontFamily: 'Cormorant Garamond, serif' }}>
+                      {plan.plan_type}
+                    </h3>
+                    <span className={`text-xs font-semibold px-3 py-1 rounded-full ${style.badge}`}>
+                      {plan.plan_type === 'Budget' ? '💚' : plan.plan_type === 'Premium' ? '✨' : '👑'}
+                    </span>
+                  </div>
+                  <div className="flex items-baseline gap-1 mb-4">
+                    <span className="text-2xl font-semibold" style={{ color: style.accent }}>
+                      {plan.currency_symbol || (plan.currency === 'INR' ? '₹' : '$')}
+                    </span>
+                    <span className="text-4xl font-semibold text-[#1C1917]">
+                      {plan.total_cost?.toLocaleString() || 'N/A'}
+                    </span>
+                  </div>
+                  <div className="space-y-2 text-sm text-[#57534E]">
+                    {plan.highlights?.slice(0, 3).map((h, i) => (
+                      <div key={i} className="flex items-start gap-2">
+                        <Check size={15} className="mt-0.5 shrink-0" style={{ color: style.accent }} />
+                        <span>{h}</span>
+                      </div>
+                    ))}
+                  </div>
+                </motion.div>
+              );
+            })}
+          </div>
+        </motion.div>
+
+        {/* ── Selected plan details ── */}
+        {selectedPlan && (
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={selectedPlan.plan_type}
+              initial={{ opacity: 0, y: 16 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -16 }}
+              transition={{ duration: 0.4 }}
+              className="space-y-8"
+            >
+              {/* Map */}
+              {mapCenter && (
+                <div className="bg-white rounded-2xl p-8 border border-[#E7E5E4] shadow-sm">
+                  <h3 className="text-2xl font-medium text-[#2A4B5C] mb-6"
+                    style={{ fontFamily: 'Cormorant Garamond, serif' }}>
+                    Destination Map
+                  </h3>
+                  <TripMap center={mapCenter} markers={mapMarkers} height="400px" zoom={11} />
+                </div>
+              )}
+
+              {/* Cost breakdown */}
+              <div data-testid="cost-breakdown" className="bg-white rounded-2xl p-8 border border-[#E7E5E4] shadow-sm">
+                <h3 className="text-2xl font-medium text-[#2A4B5C] mb-6"
+                  style={{ fontFamily: 'Cormorant Garamond, serif' }}>
+                  Cost Breakdown
+                </h3>
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-6">
+                  {selectedPlan.cost_breakdown && Object.entries(selectedPlan.cost_breakdown).map(([key, value]) => (
+                    <div key={key} className="text-center">
+                      <div className="text-3xl font-semibold mb-1" style={{ color: ps.accent }}>
+                        {formatCost(value)}
+                      </div>
+                      <div className="text-sm text-[#57534E] capitalize">{key}</div>
+                    </div>
+                  ))}
+                </div>
+                {selectedPlan.budget_tips?.length > 0 && (
+                  <div className="mt-6 pt-6 border-t border-[#E7E5E4]">
+                    <h4 className="text-xs uppercase tracking-wider font-medium mb-3" style={{ color: ps.accent }}>
+                      Budget Tips
+                    </h4>
+                    <ul className="space-y-2">
+                      {selectedPlan.budget_tips.map((tip, i) => (
+                        <li key={i} className="flex items-start gap-2 text-sm text-[#57534E]">
+                          <Check size={14} className="mt-0.5 shrink-0" style={{ color: ps.accent }} />
+                          <span>{tip}</span>
+                        </li>
+                      ))}
+                    </ul>
                   </div>
                 )}
-                <h3 className="text-2xl font-medium text-[#1C1917] mb-2" style={{ fontFamily: 'Cormorant Garamond, serif' }}>
-                  {plan.plan_type}
-                </h3>
-                <div className="flex items-baseline gap-2 mb-4">
-                  <span className="text-3xl font-semibold text-[#C47245]">
-                    {plan.currency_symbol || (plan.currency === 'INR' ? '₹' : '$')}
-                  </span>
-                  <span className="text-4xl font-semibold text-[#1C1917]">
-                    {plan.total_cost?.toLocaleString() || 'N/A'}
-                  </span>
-                </div>
-                <div className="space-y-2 text-sm text-[#57534E]">
-                  {plan.highlights?.slice(0, 3).map((highlight, i) => (
-                    <div key={i} className="flex items-start gap-2">
-                      <Check size={16} className="text-[#C47245] mt-0.5 flex-shrink-0" />
-                      <span>{highlight}</span>
-                    </div>
-                  ))}
-                </div>
-              </motion.div>
-            ))}
-          </div>
-        </div>
-
-        {/* Selected Plan Details */}
-        {selectedPlan && (
-          <div className="space-y-8">
-            {/* Map View */}
-            {mapCenter && (
-              <div className="bg-white rounded-2xl p-8 border border-[#E7E5E4]">
-                <h3 className="text-2xl font-medium text-[#2A4B5C] mb-6" style={{ fontFamily: 'Cormorant Garamond, serif' }}>
-                  Destination Map
-                </h3>
-                <TripMap center={mapCenter} markers={mapMarkers} height="400px" zoom={11} />
               </div>
-            )}
 
-            {/* Cost Breakdown */}
-            <div data-testid="cost-breakdown" className="bg-white rounded-2xl p-8 border border-[#E7E5E4]">
-              <h3 className="text-2xl font-medium text-[#2A4B5C] mb-6" style={{ fontFamily: 'Cormorant Garamond, serif' }}>
-                Cost Breakdown
-              </h3>
-              <div className="grid grid-cols-2 md:grid-cols-5 gap-6">
-                {selectedPlan.cost_breakdown && Object.entries(selectedPlan.cost_breakdown).map(([key, value]) => (
-                  <div key={key} className="text-center">
-                    <div className="text-3xl font-semibold text-[#C47245] mb-1">
-                      {formatCost(value)}
-                    </div>
-                    <div className="text-sm text-[#57534E] capitalize">{key}</div>
-                  </div>
-                ))}
-              </div>
-              {selectedPlan.budget_tips && selectedPlan.budget_tips.length > 0 && (
-                <div className="mt-6 pt-6 border-t border-[#E7E5E4]">
-                  <h4 className="text-sm uppercase tracking-wider text-[#C47245] font-medium mb-3">Budget Tips</h4>
-                  <ul className="space-y-2">
-                    {selectedPlan.budget_tips.map((tip, i) => (
-                      <li key={i} className="flex items-start gap-2 text-sm text-[#57534E]">
-                        <Check size={14} className="text-[#C47245] mt-0.5 flex-shrink-0" />
-                        <span>{tip}</span>
-                      </li>
+              {/* Itinerary */}
+              <div data-testid="itinerary-view" className="bg-white rounded-2xl p-8 border border-[#E7E5E4] shadow-sm">
+                <h3 className="text-2xl font-medium text-[#2A4B5C] mb-6"
+                  style={{ fontFamily: 'Cormorant Garamond, serif' }}>
+                  Day-by-Day Itinerary
+                </h3>
+                {selectedPlan.itinerary && Object.entries(selectedPlan.itinerary).length > 0 ? (
+                  <div className="space-y-4">
+                    {Object.entries(selectedPlan.itinerary).map(([day, details]) => (
+                      <DayCard
+                        key={day}
+                        day={day}
+                        details={details}
+                        formatCost={formatCost}
+                        accent={ps.accent}
+                      />
                     ))}
-                  </ul>
-                </div>
-              )}
-            </div>
+                  </div>
+                ) : (
+                  <p className="text-[#57534E]">Itinerary is being generated. Please check back soon.</p>
+                )}
+              </div>
 
-            {/* Itinerary */}
-            <div data-testid="itinerary-view" className="bg-white rounded-2xl p-8 border border-[#E7E5E4]">
-              <h3 className="text-2xl font-medium text-[#2A4B5C] mb-6" style={{ fontFamily: 'Cormorant Garamond, serif' }}>
-                Day-by-Day Itinerary
-              </h3>
-              {selectedPlan.itinerary && Object.entries(selectedPlan.itinerary).length > 0 ? (
-                <div className="space-y-8">
-                  {Object.entries(selectedPlan.itinerary).map(([day, details], idx) => (
-                    <div key={day} className="border-l-4 border-[#C47245] pl-6">
-                      <div className="flex flex-wrap items-baseline justify-between gap-2 mb-4">
-                        <h4 className="text-xl font-medium text-[#1C1917]" style={{ fontFamily: 'Cormorant Garamond, serif' }}>
-                          {day.replace('_', ' ').toUpperCase()}
-                          {details.date && ` — ${details.date}`}
-                        </h4>
-                        {details.daily_total ? (
-                          <div className="text-right">
-                            <div className="text-2xl font-semibold text-[#C47245]" style={{ fontFamily: 'Cormorant Garamond, serif' }}>
-                              {formatCost(details.daily_total)}
-                            </div>
-                            <div className="text-xs text-[#57534E]">Day total</div>
-                          </div>
-                        ) : null}
-                      </div>
-                      
-                      {/* Transportation */}
-                      {details.transportation && (
-                        <div className="mb-4">
-                          <div className="flex items-center gap-2 text-[#C47245] mb-2">
-                            <Plane size={18} />
-                            <span className="font-medium">Transportation</span>
-                          </div>
-                          <div className="ml-6 text-[#57534E]">
-                            <span className="font-medium capitalize">{details.transportation.mode}:</span> {details.transportation.details}
-                            {details.transportation.cost !== undefined && (
-                              <span className="text-[#C47245] font-medium"> — {formatCost(details.transportation.cost)}</span>
-                            )}
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Activities */}
-                      {details.activities && details.activities.length > 0 && (
-                        <div className="mb-4">
-                          <div className="flex items-center gap-2 text-[#C47245] mb-2">
-                            <Activity size={18} />
-                            <span className="font-medium">Activities</span>
-                          </div>
-                          <div className="space-y-2 ml-6">
-                            {details.activities.map((activity, i) => (
-                              <div key={i} className="text-[#57534E]">
-                                <span className="font-medium">{activity.time}:</span> {activity.activity}
-                                {activity.location && ` at ${activity.location}`}
-                                {activity.cost !== undefined && (
-                                  <span className="text-[#C47245] font-medium"> — {activity.cost === 0 ? 'Free' : formatCost(activity.cost)}</span>
-                                )}
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Accommodation */}
-                      {details.accommodation && (
-                        <div className="mb-4">
-                          <div className="flex items-center gap-2 text-[#C47245] mb-2">
-                            <Hotel size={18} />
-                            <span className="font-medium">Accommodation</span>
-                          </div>
-                          <div className="ml-6 text-[#57534E]">
-                            {details.accommodation.name} ({details.accommodation.type})
-                            {details.accommodation.cost !== undefined && (
-                              <span className="text-[#C47245] font-medium"> — {formatCost(details.accommodation.cost)}</span>
-                            )}
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Meals */}
-                      {details.meals && details.meals.length > 0 && (
-                        <div className="mb-3">
-                          <div className="flex items-center gap-2 text-[#C47245] mb-2">
-                            <Utensils size={18} />
-                            <span className="font-medium">Meals</span>
-                          </div>
-                          <div className="space-y-1 ml-6">
-                            {details.meals.map((meal, i) => (
-                              <div key={i} className="text-[#57534E]">
-                                <span className="font-medium capitalize">{meal.time}:</span> {meal.restaurant}
-                                {meal.cuisine && ` (${meal.cuisine})`}
-                                {meal.cost !== undefined && (
-                                  <span className="text-[#C47245] font-medium"> — {formatCost(meal.cost)}</span>
-                                )}
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Cumulative total */}
-                      {details.cumulative_total !== undefined && (
-                        <div className="mt-3 pt-3 border-t border-[#E7E5E4] text-sm text-[#57534E] flex justify-between">
-                          <span>Cumulative trip total:</span>
-                          <span className="font-medium text-[#C47245]">{formatCost(details.cumulative_total)}</span>
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p className="text-[#57534E]">Itinerary is being generated. Please check back soon.</p>
-              )}
-            </div>
-
-            {/* Action Button */}
-            <div className="flex justify-center">
-              <Button
-                onClick={() => navigate('/dashboard')}
-                className="bg-[#C47245] hover:bg-[#A85D38] px-8 py-6 text-lg"
-              >
-                Save to Dashboard
-              </Button>
-            </div>
-          </div>
+              {/* Save CTA */}
+              <div className="flex justify-center pb-8">
+                <motion.div whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.97 }}>
+                  <Button
+                    onClick={() => navigate('/dashboard')}
+                    className="text-white px-10 py-6 text-lg rounded-2xl shadow-xl hover:shadow-2xl transition-all gap-2"
+                    style={{ background: `linear-gradient(135deg, ${ps.accent}, ${ps.accent}CC)` }}
+                  >
+                    <Sparkles size={20} />
+                    Save to Dashboard
+                  </Button>
+                </motion.div>
+              </div>
+            </motion.div>
+          </AnimatePresence>
         )}
       </div>
     </div>

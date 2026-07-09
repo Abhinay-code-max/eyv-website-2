@@ -10,6 +10,7 @@ import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
 import { Checkbox } from '../components/ui/checkbox';
 import LocationAutocomplete from '../components/LocationAutocomplete';
+import TripLoadingScreen from '../components/TripLoadingScreen';
 
 const TripPlannerPage = ({ user }) => {
   const navigate = useNavigate();
@@ -38,13 +39,8 @@ const TripPlannerPage = ({ user }) => {
 
   const totalSteps = 4;
 
-  const handleNext = () => {
-    if (step < totalSteps) setStep(step + 1);
-  };
-
-  const handlePrev = () => {
-    if (step > 1) setStep(step - 1);
-  };
+  const handleNext = () => { if (step < totalSteps) setStep(step + 1); };
+  const handlePrev = () => { if (step > 1) setStep(step - 1); };
 
   const handleSubmit = async () => {
     setLoading(true);
@@ -58,7 +54,6 @@ const TripPlannerPage = ({ user }) => {
     } catch (error) {
       console.error('Error generating trip:', error);
       alert('Failed to generate trip plans. Please try again.');
-    } finally {
       setLoading(false);
     }
   };
@@ -72,6 +67,15 @@ const TripPlannerPage = ({ user }) => {
     }));
   };
 
+  /* ── Show cinematic loader during AI generation ── */
+  if (loading) {
+    return (
+      <TripLoadingScreen
+        destination={formData.destination || 'your destination'}
+      />
+    );
+  }
+
   return (
     <div data-testid={TRIP_PLANNER.plannerForm} className="min-h-screen bg-gradient-to-br from-[#FDFBF7] via-[#F5F2EB] to-[#FDFBF7] py-12 px-4">
       <div className="max-w-4xl mx-auto">
@@ -81,7 +85,7 @@ const TripPlannerPage = ({ user }) => {
             AI Trip Planner
           </h1>
           <p className="text-lg text-[#57534E]">Tell us about your dream vacation</p>
-          
+
           {/* Progress */}
           <div className="flex items-center justify-center gap-2 mt-8">
             {[1, 2, 3, 4].map(s => (
@@ -102,13 +106,8 @@ const TripPlannerPage = ({ user }) => {
         >
           <AnimatePresence mode="wait">
             {step === 1 && (
-              <motion.div
-                key="step1"
-                initial={{ opacity: 0, x: 20 }}
-                animate={{ opacity: 1, x: 0 }}
-                exit={{ opacity: 0, x: -20 }}
-                className="space-y-6"
-              >
+              <motion.div key="step1" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: -20 }} className="space-y-6">
                 <h2 className="text-2xl font-medium text-[#2A4B5C] mb-6" style={{ fontFamily: 'Cormorant Garamond, serif' }}>
                   Trip Basics
                 </h2>
@@ -165,49 +164,22 @@ const TripPlannerPage = ({ user }) => {
                 <div>
                   <Label className="text-[#C47245] uppercase tracking-wider text-xs font-medium mb-3 block">Travelers</Label>
                   <div className="grid grid-cols-3 gap-4">
-                    <div>
-                      <label className="text-sm text-[#57534E]">Adults</label>
-                      <Input
-                        type="number"
-                        min="0"
-                        value={formData.adults}
-                        onChange={(e) => setFormData({ ...formData, adults: parseInt(e.target.value) || 0 })}
-                        className="border-[#E7E5E4] mt-1"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-sm text-[#57534E]">Children</label>
-                      <Input
-                        type="number"
-                        min="0"
-                        value={formData.children}
-                        onChange={(e) => setFormData({ ...formData, children: parseInt(e.target.value) || 0 })}
-                        className="border-[#E7E5E4] mt-1"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-sm text-[#57534E]">Seniors</label>
-                      <Input
-                        type="number"
-                        min="0"
-                        value={formData.seniors}
-                        onChange={(e) => setFormData({ ...formData, seniors: parseInt(e.target.value) || 0 })}
-                        className="border-[#E7E5E4] mt-1"
-                      />
-                    </div>
+                    {[['adults','Adults'],['children','Children'],['seniors','Seniors']].map(([field, label]) => (
+                      <div key={field}>
+                        <label className="text-sm text-[#57534E]">{label}</label>
+                        <Input type="number" min="0" value={formData[field]}
+                          onChange={(e) => setFormData({ ...formData, [field]: parseInt(e.target.value) || 0 })}
+                          className="border-[#E7E5E4] mt-1" />
+                      </div>
+                    ))}
                   </div>
                 </div>
               </motion.div>
             )}
 
             {step === 2 && (
-              <motion.div
-                key="step2"
-                initial={{ opacity: 0, x: 20 }}
-                animate={{ opacity: 1, x: 0 }}
-                exit={{ opacity: 0, x: -20 }}
-                className="space-y-6"
-              >
+              <motion.div key="step2" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: -20 }} className="space-y-6">
                 <h2 className="text-2xl font-medium text-[#2A4B5C] mb-6" style={{ fontFamily: 'Cormorant Garamond, serif' }}>
                   Travel Preferences
                 </h2>
@@ -215,15 +187,13 @@ const TripPlannerPage = ({ user }) => {
                   <Label className="text-[#C47245] uppercase tracking-wider text-xs font-medium mb-3 block">Transportation</Label>
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                     {TRANSPORTATION_OPTIONS.map(option => (
-                      <button
-                        key={option.value}
+                      <button key={option.value}
                         onClick={() => setFormData({ ...formData, transportation: option.value })}
                         className={`p-4 rounded-xl border-2 transition-all ${
                           formData.transportation === option.value
                             ? 'border-[#C47245] bg-[#C47245]/10'
                             : 'border-[#E7E5E4] hover:border-[#C47245]/50'
-                        }`}
-                      >
+                        }`}>
                         <div className="text-2xl mb-1">{option.icon}</div>
                         <div className="text-sm font-medium text-[#1C1917]">{option.label}</div>
                       </button>
@@ -234,15 +204,13 @@ const TripPlannerPage = ({ user }) => {
                   <Label className="text-[#C47245] uppercase tracking-wider text-xs font-medium mb-3 block">Budget Level</Label>
                   <div className="space-y-2">
                     {BUDGET_LEVELS.map(level => (
-                      <button
-                        key={level.value}
+                      <button key={level.value}
                         onClick={() => setFormData({ ...formData, budget_level: level.value })}
                         className={`w-full p-4 rounded-xl border-2 transition-all text-left ${
                           formData.budget_level === level.value
                             ? 'border-[#C47245] bg-[#C47245]/10'
                             : 'border-[#E7E5E4] hover:border-[#C47245]/50'
-                        }`}
-                      >
+                        }`}>
                         <div className="font-medium text-[#1C1917]">{level.label}</div>
                         <div className="text-sm text-[#57534E]">{level.description}</div>
                       </button>
@@ -253,15 +221,12 @@ const TripPlannerPage = ({ user }) => {
                   <Label className="text-[#C47245] uppercase tracking-wider text-xs font-medium mb-3 block">Accommodation Preferences</Label>
                   <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                     {ACCOMMODATION_OPTIONS.map(option => (
-                      <div
-                        key={option}
-                        onClick={() => toggleArrayItem('accommodation', option)}
+                      <div key={option} onClick={() => toggleArrayItem('accommodation', option)}
                         className={`p-3 rounded-lg border-2 cursor-pointer transition-all ${
                           formData.accommodation.includes(option)
                             ? 'border-[#C47245] bg-[#C47245]/10'
                             : 'border-[#E7E5E4] hover:border-[#C47245]/50'
-                        }`}
-                      >
+                        }`}>
                         <div className="flex items-center gap-2">
                           <Checkbox checked={formData.accommodation.includes(option)} />
                           <span className="text-sm text-[#1C1917]">{option}</span>
@@ -274,13 +239,8 @@ const TripPlannerPage = ({ user }) => {
             )}
 
             {step === 3 && (
-              <motion.div
-                key="step3"
-                initial={{ opacity: 0, x: 20 }}
-                animate={{ opacity: 1, x: 0 }}
-                exit={{ opacity: 0, x: -20 }}
-                className="space-y-6"
-              >
+              <motion.div key="step3" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: -20 }} className="space-y-6">
                 <h2 className="text-2xl font-medium text-[#2A4B5C] mb-6" style={{ fontFamily: 'Cormorant Garamond, serif' }}>
                   Interests & Activities
                 </h2>
@@ -288,15 +248,12 @@ const TripPlannerPage = ({ user }) => {
                   <Label className="text-[#C47245] uppercase tracking-wider text-xs font-medium mb-3 block">What interests you?</Label>
                   <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                     {INTERESTS.map(interest => (
-                      <div
-                        key={interest}
-                        onClick={() => toggleArrayItem('interests', interest)}
+                      <div key={interest} onClick={() => toggleArrayItem('interests', interest)}
                         className={`p-3 rounded-lg border-2 cursor-pointer transition-all ${
                           formData.interests.includes(interest)
                             ? 'border-[#C47245] bg-[#C47245]/10'
                             : 'border-[#E7E5E4] hover:border-[#C47245]/50'
-                        }`}
-                      >
+                        }`}>
                         <div className="flex items-center gap-2">
                           <Checkbox checked={formData.interests.includes(interest)} />
                           <span className="text-sm text-[#1C1917]">{interest}</span>
@@ -309,15 +266,13 @@ const TripPlannerPage = ({ user }) => {
                   <Label className="text-[#C47245] uppercase tracking-wider text-xs font-medium mb-3 block">Trip Type</Label>
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                     {TRIP_TYPES.map(type => (
-                      <button
-                        key={type.value}
+                      <button key={type.value}
                         onClick={() => setFormData({ ...formData, trip_type: type.value })}
                         className={`p-4 rounded-xl border-2 transition-all ${
                           formData.trip_type === type.value
                             ? 'border-[#C47245] bg-[#C47245]/10'
                             : 'border-[#E7E5E4] hover:border-[#C47245]/50'
-                        }`}
-                      >
+                        }`}>
                         <div className="text-sm font-medium text-[#1C1917]">{type.label}</div>
                       </button>
                     ))}
@@ -327,47 +282,36 @@ const TripPlannerPage = ({ user }) => {
             )}
 
             {step === 4 && (
-              <motion.div
-                key="step4"
-                initial={{ opacity: 0, x: 20 }}
-                animate={{ opacity: 1, x: 0 }}
-                exit={{ opacity: 0, x: -20 }}
-                className="space-y-6"
-              >
+              <motion.div key="step4" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: -20 }} className="space-y-6">
                 <h2 className="text-2xl font-medium text-[#2A4B5C] mb-6" style={{ fontFamily: 'Cormorant Garamond, serif' }}>
                   Additional Details
                 </h2>
                 <div>
                   <Label className="text-[#C47245] uppercase tracking-wider text-xs font-medium">Dietary Preferences (Optional)</Label>
-                  <Input
-                    value={formData.dietary_preferences}
+                  <Input value={formData.dietary_preferences}
                     onChange={(e) => setFormData({ ...formData, dietary_preferences: e.target.value })}
                     placeholder="E.g., Vegetarian, Vegan, Halal, etc."
-                    className="border-[#E7E5E4] mt-2"
-                  />
+                    className="border-[#E7E5E4] mt-2" />
                 </div>
                 <div>
                   <Label className="text-[#C47245] uppercase tracking-wider text-xs font-medium">Accessibility Requirements (Optional)</Label>
-                  <Input
-                    value={formData.accessibility_requirements}
+                  <Input value={formData.accessibility_requirements}
                     onChange={(e) => setFormData({ ...formData, accessibility_requirements: e.target.value })}
                     placeholder="Any special accessibility needs?"
-                    className="border-[#E7E5E4] mt-2"
-                  />
+                    className="border-[#E7E5E4] mt-2" />
                 </div>
                 <div>
                   <Label className="text-[#C47245] uppercase tracking-wider text-xs font-medium mb-3 block">Travel Pace</Label>
                   <div className="grid grid-cols-3 gap-3">
                     {['Relaxed', 'Moderate', 'Fast-paced'].map(pace => (
-                      <button
-                        key={pace}
+                      <button key={pace}
                         onClick={() => setFormData({ ...formData, travel_pace: pace })}
                         className={`p-3 rounded-lg border-2 transition-all ${
                           formData.travel_pace === pace
                             ? 'border-[#C47245] bg-[#C47245]/10'
                             : 'border-[#E7E5E4] hover:border-[#C47245]/50'
-                        }`}
-                      >
+                        }`}>
                         <div className="text-sm font-medium text-[#1C1917]">{pace}</div>
                       </button>
                     ))}
@@ -379,39 +323,21 @@ const TripPlannerPage = ({ user }) => {
 
           {/* Navigation */}
           <div className="flex items-center justify-between mt-8 pt-6 border-t border-[#E7E5E4]">
-            <Button
-              onClick={handlePrev}
-              disabled={step === 1}
-              variant="outline"
-              className="border-[#E7E5E4]"
-            >
+            <Button onClick={handlePrev} disabled={step === 1} variant="outline" className="border-[#E7E5E4]">
               <ChevronLeft size={20} />
               Previous
             </Button>
             {step < totalSteps ? (
-              <Button
-                data-testid={TRIP_PLANNER.submitButton}
-                onClick={handleNext}
-                className="bg-[#C47245] hover:bg-[#A85D38]"
-              >
+              <Button data-testid={TRIP_PLANNER.submitButton} onClick={handleNext}
+                className="bg-[#C47245] hover:bg-[#A85D38]">
                 Next
                 <ChevronRight size={20} />
               </Button>
             ) : (
-              <Button
-                data-testid={TRIP_PLANNER.submitButton}
-                onClick={handleSubmit}
-                disabled={loading}
-                className="bg-[#C47245] hover:bg-[#A85D38]"
-              >
-                {loading ? (
-                  <>Generating Plans...</>
-                ) : (
-                  <>
-                    <Sparkles size={20} />
-                    Generate Plans
-                  </>
-                )}
+              <Button data-testid={TRIP_PLANNER.submitButton} onClick={handleSubmit}
+                disabled={loading} className="bg-[#C47245] hover:bg-[#A85D38]">
+                <Sparkles size={20} />
+                Generate Plans
               </Button>
             )}
           </div>
