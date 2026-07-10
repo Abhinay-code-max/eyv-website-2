@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, field_validator
 from typing import List, Optional, Dict, Any
 import uuid
 import secrets
@@ -27,6 +27,7 @@ import stripe
 from services import amadeus_service, storage_service, rewards_service, locations_service
 from services import ignav_service as duffel_service  # Ignav replaces Sky Scrapper
 from services import serpapi_hotels_service
+from services import price_cache_service
 
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
@@ -804,12 +805,32 @@ class HotelSearchRequest(BaseModel):
     travelers: int = 1
 
 
+# Keys that carry a price/amount. Rejected outright on BookingRequest.item_data so
+# it's structurally impossible for a client to smuggle a price into a booking -
+# the server always determines price by looking up item_id in price_cache.
+_FORBIDDEN_ITEM_DATA_KEYS = {
+    "price", "amount", "total_amount", "total_price",
+    "unit_amount", "unit_price", "cost", "fare",
+}
+
+
 class BookingRequest(BaseModel):
     booking_type: str  # 'flight' or 'hotel'
-    item_id: str
-    item_data: Dict[str, Any]
+    item_id: str  # price_cache key returned by /search/flights or /search/hotels
+    item_data: Dict[str, Any] = Field(default_factory=dict)  # display-only fields, no price
     trip_id: Optional[str] = None
     traveler_details: Optional[Dict[str, Any]] = None
+
+    @field_validator("item_data")
+    @classmethod
+    def _reject_price_fields(cls, v):
+        found = _FORBIDDEN_ITEM_DATA_KEYS & v.keys()
+        if found:
+            raise ValueError(
+                f"item_data must not contain price fields ({', '.join(sorted(found))}); "
+                "price is always determined server-side from item_id"
+            )
+        return v
 
 
 @api_router.post("/search/flights")
@@ -819,14 +840,26 @@ async def search_flights_endpoint(req: FlightSearchRequest, request: Request):
     flights = await duffel_service.search_flights(
         req.origin, req.destination, req.departure_date, req.return_date, req.travelers
     )
+    provider = "ignav"
     if not flights:
         logger.warning("Duffel returned no flights, falling back to mock data")
         flights = amadeus_service._generate_mock_flights(
             req.origin, req.destination, req.departure_date,
             req.return_date or req.departure_date, req.travelers
         )
+        provider = "mock"
     # Sort: cheapest first
     flights = sorted(flights, key=lambda f: f["price"]["total"])
+    # Cache the authoritative price per result and stamp an item_id - the
+    # client only ever gets to reference that id back, never the price itself.
+    await price_cache_service.cache_search_results(
+        db, flights, "flight", provider,
+        {
+            "origin": req.origin, "destination": req.destination,
+            "departure_date": req.departure_date, "return_date": req.return_date,
+            "travelers": req.travelers,
+        },
+    )
     return {"flights": flights, "count": len(flights)}
 
 class TrainSearchRequest(BaseModel):
@@ -855,13 +888,24 @@ async def search_hotels_endpoint(req: HotelSearchRequest, request: Request):
     hotels = await serpapi_hotels_service.search_hotels(
         req.destination, req.check_in, req.check_out, req.travelers, currency="INR"
     )
+    provider = "serpapi"
     if not hotels:
         logger.warning("SerpApi returned no hotels, falling back to mock data")
         hotels = amadeus_service._generate_mock_hotels(
             req.destination, req.check_in, req.check_out, req.travelers
         )
+        provider = "mock"
     # Enforce tier ordering: always sort by price ascending
     hotels = sorted(hotels, key=lambda h: h["price"]["per_night"])
+    # Cache the authoritative price per result and stamp an item_id - the
+    # client only ever gets to reference that id back, never the price itself.
+    await price_cache_service.cache_search_results(
+        db, hotels, "hotel", provider,
+        {
+            "destination": req.destination, "check_in": req.check_in,
+            "check_out": req.check_out, "travelers": req.travelers,
+        },
+    )
     return {"hotels": hotels, "count": len(hotels)}
 
 
@@ -887,12 +931,20 @@ async def locations_autocomplete(q: str = Query("", min_length=0)):
 
 @api_router.post("/bookings")
 async def create_booking(req: BookingRequest, request: Request):
-    """Create a mock booking. In production, this would call real booking APIs."""
+    """Create a booking. Price is never trusted from the client - it's resolved
+    server-side from price_cache (set at search time) by req.item_id."""
     user = await get_current_user(request)
-    
+
+    resolved = await price_cache_service.resolve_price(db, req.item_id)
+    if not resolved:
+        raise HTTPException(
+            status_code=410,
+            detail="This offer has expired. Please search again.",
+        )
+
     booking_id = f"BK{uuid.uuid4().hex[:10].upper()}"
     confirmation_code = f"EYV-{uuid.uuid4().hex[:8].upper()}"
-    
+
     booking_doc = {
         "booking_id": booking_id,
         "confirmation_code": confirmation_code,
@@ -903,11 +955,11 @@ async def create_booking(req: BookingRequest, request: Request):
         "traveler_details": req.traveler_details or {},
         "status": "confirmed",
         "payment_status": "mock_paid",
-        "total_amount": req.item_data.get("price", {}).get("total", 0),
-        "currency": req.item_data.get("price", {}).get("currency", "USD"),
+        "total_amount": resolved["price"],
+        "currency": resolved["currency"],
         "created_at": datetime.now(timezone.utc).isoformat()
     }
-    
+
     await db.bookings.insert_one(booking_doc)
     booking_doc.pop("_id", None)
     return booking_doc
@@ -1411,6 +1463,10 @@ async def startup_event():
         storage_service.init_storage()
     except Exception as e:
         logger.warning(f"Storage init failed at startup: {e}")
+    try:
+        await price_cache_service.ensure_indexes(db)
+    except Exception as e:
+        logger.warning(f"price_cache index setup failed at startup: {e}")
 
 
 app.include_router(api_router)

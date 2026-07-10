@@ -213,8 +213,10 @@ const BookingPage = ({ user }) => {
 
   const confirmBooking = async () => {
     try {
+      // eslint-disable-next-line no-unused-vars
+      const { price, ...itemDataWithoutPrice } = selectedItem.item;
       const br = await axios.post(`${API_URL}/bookings`,
-        { booking_type: selectedItem.type, item_id: selectedItem.item.id, item_data: selectedItem.item },
+        { booking_type: selectedItem.type, item_id: selectedItem.item.item_id, item_data: itemDataWithoutPrice },
         { withCredentials: true }
       );
       const cr = await axios.post(`${API_URL}/payments/checkout`,
@@ -753,6 +755,13 @@ const BookingPage = ({ user }) => {
               <div className="bg-[#F5F2EB] py-3 px-4 rounded-xl font-mono text-xl text-[#C47245] mb-6 tracking-widest">
                 {bookingSuccess.confirmation_code}
               </div>
+              {typeof bookingSuccess.total_amount === 'number' && (
+                <p className="text-[#57534E] mb-6">
+                  Total: <span className="font-semibold text-[#1C1917]">
+                    {fmt({ total: bookingSuccess.total_amount, currency: bookingSuccess.currency }, 'total')}
+                  </span>
+                </p>
+              )}
               <Button onClick={() => { setBookingSuccess(null); setActiveTab('bookings'); }}
                 className="w-full bg-[#C47245] hover:bg-[#A85D38] rounded-xl transition-all active:scale-95">
                 View My Bookings
