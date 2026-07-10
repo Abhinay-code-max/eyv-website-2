@@ -214,23 +214,33 @@ def test_checkout_yearly_creates_stripe_session():
 
 
 def test_checkout_with_booking_id():
-    # Create a booking first
+    # Search first - price must come from a real, server-cached item_id.
+    search_payload = {"origin": "JFK", "destination": "Paris",
+                       "departure_date": "2026-03-01", "travelers": 1}
+    r = requests.post(f"{BASE_URL}/api/search/flights", json=search_payload, headers=HEADERS)
+    assert r.status_code == 200, r.text
+    flight = r.json()["flights"][0]
+    expected_price = flight["price"]["total"]
+
+    # Create a booking - note the (ignored) tampered "price" field, proving it has no effect
     booking_payload = {
         "booking_type": "flight",
-        "item_id": "TEST_flight_pay_1",
-        "item_data": {"id": "TEST_flight_pay_1", "airline": "Test Air",
-                      "price": {"total": 250.00, "currency": "USD"}},
+        "item_id": flight["item_id"],
+        "item_data": {"id": flight["id"], "airline": "Test Air"},
+        "price": 1,
     }
     r = requests.post(f"{BASE_URL}/api/bookings", json=booking_payload, headers=HEADERS)
     assert r.status_code == 200
-    booking_id = r.json()["booking_id"]
+    booking = r.json()
+    assert booking["total_amount"] == expected_price
+    booking_id = booking["booking_id"]
     # Checkout
     r = requests.post(f"{BASE_URL}/api/payments/checkout",
                       json={"booking_id": booking_id,
                             "origin_url": "https://example.com"}, headers=HEADERS)
     assert r.status_code == 200, r.text
     data = r.json()
-    assert data["amount"] == 250.00
+    assert data["amount"] == expected_price
     assert data["url"].startswith("https://checkout.stripe.com")
 
 

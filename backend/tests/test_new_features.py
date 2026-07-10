@@ -92,15 +92,24 @@ def test_bookings_unauthorized():
 
 
 def test_booking_lifecycle():
-    # Create
+    # Price must come from a real, server-cached item_id returned by search -
+    # it can no longer be supplied directly in the booking request.
+    search_payload = {"origin": "JFK", "destination": "Paris",
+                       "departure_date": "2026-03-01", "return_date": "2026-03-08", "travelers": 1}
+    r = requests.post(f"{BASE_URL}/api/search/flights", json=search_payload, headers=HEADERS)
+    assert r.status_code == 200, r.text
+    flight = r.json()["flights"][0]
+    assert "item_id" in flight
+    expected_price = flight["price"]["total"]
+    expected_currency = flight["price"]["currency"]
+
     item_data = {
-        "id": "flight_test_1",
-        "airline": "Test Air",
-        "price": {"total": 599.99, "currency": "USD"}
+        "id": flight["id"],
+        "airline": flight["airline"],
     }
     payload = {
         "booking_type": "flight",
-        "item_id": "flight_test_1",
+        "item_id": flight["item_id"],
         "item_data": item_data,
         "traveler_details": {"name": "Test User", "email": "test@example.com"}
     }
@@ -112,8 +121,9 @@ def test_booking_lifecycle():
     assert booking["confirmation_code"].startswith("EYV-")
     assert booking["status"] == "confirmed"
     assert booking["payment_status"] == "mock_paid"
-    assert booking["total_amount"] == 599.99
-    assert booking["currency"] == "USD"
+    # Price is resolved server-side from the cached search result, never from the request
+    assert booking["total_amount"] == expected_price
+    assert booking["currency"] == expected_currency
     assert "_id" not in booking
     booking_id = booking["booking_id"]
 
@@ -146,6 +156,52 @@ def test_booking_not_found():
 def test_booking_delete_not_found():
     r = requests.delete(f"{BASE_URL}/api/bookings/BKNONEXISTENT", headers=AUTH_HEADER)
     assert r.status_code == 404
+
+
+# ========== Price tamper-resistance ==========
+
+def test_booking_rejects_client_supplied_price():
+    """item_data must not be able to carry a price - the field is rejected at
+    the schema level (422), not silently stripped."""
+    payload = {
+        "booking_type": "flight",
+        "item_id": "irrelevant-rejected-before-any-lookup",
+        "item_data": {"airline": "Test Air", "price": {"total": 1, "currency": "USD"}},
+    }
+    r = requests.post(f"{BASE_URL}/api/bookings", json=payload, headers=HEADERS)
+    assert r.status_code == 422
+
+
+def test_booking_ignores_tampered_top_level_price_fields():
+    """Extra price/amount fields outside the declared schema must have zero
+    effect - the stored price always comes from the cached item_id lookup."""
+    search_payload = {"origin": "JFK", "destination": "Paris",
+                       "departure_date": "2026-03-01", "travelers": 1}
+    r = requests.post(f"{BASE_URL}/api/search/flights", json=search_payload, headers=HEADERS)
+    flight = r.json()["flights"][0]
+    expected_price = flight["price"]["total"]
+
+    payload = {
+        "booking_type": "flight",
+        "item_id": flight["item_id"],
+        "item_data": {"airline": flight["airline"]},
+        "price": 1, "amount": 1, "total_amount": 1,
+    }
+    r = requests.post(f"{BASE_URL}/api/bookings", json=payload, headers=HEADERS)
+    assert r.status_code == 200, r.text
+    assert r.json()["total_amount"] == expected_price
+
+
+def test_booking_unknown_item_id_returns_expired():
+    """A forged/unknown item_id must never fall back to any client-supplied
+    number - it must fail closed with a clear 'expired, search again' error."""
+    payload = {
+        "booking_type": "flight",
+        "item_id": "00000000-0000-0000-0000-000000000000",
+        "item_data": {"airline": "Test Air"},
+    }
+    r = requests.post(f"{BASE_URL}/api/bookings", json=payload, headers=HEADERS)
+    assert r.status_code == 410
 
 
 # ========== Wallet ==========
