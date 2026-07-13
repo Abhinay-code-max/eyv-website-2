@@ -29,6 +29,7 @@ from services import amadeus_service, storage_service, rewards_service, location
 from services import ignav_service as duffel_service  # Ignav replaces Sky Scrapper
 from services import serpapi_hotels_service
 from services import price_cache_service
+from services import log_redaction
 
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
@@ -54,6 +55,10 @@ api_router = APIRouter(prefix="/api")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+# SerpApi's api_key travels as a URL query param (no header alternative -
+# confirmed against their docs/client source) and httpx logs full request
+# URLs at INFO - scrub it before it reaches any handler, at any log level.
+log_redaction.install_secret_redaction()
 
 # Models
 class User(BaseModel):
