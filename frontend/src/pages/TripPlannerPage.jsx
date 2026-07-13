@@ -11,6 +11,7 @@ import { Label } from '../components/ui/label';
 import { Checkbox } from '../components/ui/checkbox';
 import LocationAutocomplete from '../components/LocationAutocomplete';
 import TripLoadingScreen from '../components/TripLoadingScreen';
+import { getTotalTravelers, validateTravelers } from '../lib/travelers';
 
 const TripPlannerPage = ({ user }) => {
   const navigate = useNavigate();
@@ -21,7 +22,6 @@ const TripPlannerPage = ({ user }) => {
     starting_location: '',
     departure_date: '',
     return_date: '',
-    num_travelers: 1,
     adults: 1,
     children: 0,
     seniors: 0,
@@ -39,15 +39,23 @@ const TripPlannerPage = ({ user }) => {
 
   const totalSteps = 4;
 
-  const handleNext = () => { if (step < totalSteps) setStep(step + 1); };
+  const totalTravelers = getTotalTravelers(formData);
+  const travelersError = validateTravelers(formData);
+
+  const handleNext = () => {
+    if (step === 1 && travelersError) return;
+    if (step < totalSteps) setStep(step + 1);
+  };
   const handlePrev = () => { if (step > 1) setStep(step - 1); };
 
   const handleSubmit = async () => {
+    if (travelersError) return;
     setLoading(true);
     try {
+      const payload = { ...formData, num_travelers: totalTravelers };
       const response = await axios.post(
         `${API_URL}/trips/generate`,
-        formData,
+        payload,
         { withCredentials: true }
       );
       navigate(`/trip-results/${response.data.trip_id}`);
@@ -164,15 +172,23 @@ const TripPlannerPage = ({ user }) => {
                 <div>
                   <Label className="text-[#C47245] uppercase tracking-wider text-xs font-medium mb-3 block">Travelers</Label>
                   <div className="grid grid-cols-3 gap-4">
-                    {[['adults','Adults'],['children','Children'],['seniors','Seniors']].map(([field, label]) => (
+                    {[['adults','Adults',TRIP_PLANNER.adultsInput],['children','Children',TRIP_PLANNER.childrenInput],['seniors','Seniors',TRIP_PLANNER.seniorsInput]].map(([field, label, testId]) => (
                       <div key={field}>
                         <label className="text-sm text-[#57534E]">{label}</label>
-                        <Input type="number" min="0" value={formData[field]}
-                          onChange={(e) => setFormData({ ...formData, [field]: parseInt(e.target.value) || 0 })}
+                        <Input data-testid={testId} type="number" min="0" step="1" value={formData[field]}
+                          onChange={(e) => setFormData({ ...formData, [field]: e.target.value === '' ? 0 : Number(e.target.value) })}
                           className="border-[#E7E5E4] mt-1" />
                       </div>
                     ))}
                   </div>
+                  <p data-testid={TRIP_PLANNER.travelersTotalDisplay} className="text-sm text-[#57534E] mt-3">
+                    Total travelers: {totalTravelers}
+                  </p>
+                  {travelersError && (
+                    <p data-testid={TRIP_PLANNER.travelersError} className="text-sm text-red-600 mt-1">
+                      {travelersError}
+                    </p>
+                  )}
                 </div>
               </motion.div>
             )}
@@ -329,13 +345,13 @@ const TripPlannerPage = ({ user }) => {
             </Button>
             {step < totalSteps ? (
               <Button data-testid={TRIP_PLANNER.submitButton} onClick={handleNext}
-                className="bg-[#C47245] hover:bg-[#A85D38]">
+                disabled={step === 1 && !!travelersError} className="bg-[#C47245] hover:bg-[#A85D38]">
                 Next
                 <ChevronRight size={20} />
               </Button>
             ) : (
               <Button data-testid={TRIP_PLANNER.submitButton} onClick={handleSubmit}
-                disabled={loading} className="bg-[#C47245] hover:bg-[#A85D38]">
+                disabled={loading || !!travelersError} className="bg-[#C47245] hover:bg-[#A85D38]">
                 <Sparkles size={20} />
                 Generate Plans
               </Button>

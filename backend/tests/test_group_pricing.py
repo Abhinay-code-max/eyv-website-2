@@ -1,10 +1,17 @@
 """
 Group-size pricing tests for generate_single_plan() (AI trip itinerary estimates).
 
-Confirmed bug: a 4-traveler trip generated flight/hotel/meal costs identical to
-a solo trip - only train pricing multiplied by num_travelers. These tests cover
-the deterministic scaling helpers directly (fast, no live API/LLM calls needed),
-plus a live end-to-end check that generates real trips for 1 and 4 travelers.
+Confirmed bug #1: a 4-traveler trip generated flight/hotel/meal costs identical to
+a solo trip - only train pricing multiplied by num_travelers.
+
+Confirmed bug #2: the planner form's Adults/Children/Seniors inputs never updated
+num_travelers at all (it was a separate, stale, hardcoded-to-1 field) - so every
+multi-traveler trip was priced as a solo trip regardless of group size. Fixed by
+deriving num_travelers server-side from adults+children+seniors (TripPreferences
+model_validator) instead of trusting whatever the client sent.
+
+These tests cover the deterministic scaling helpers directly (fast, no live
+API/LLM calls needed), plus live end-to-end checks against a running backend.
 
 Note: this is the AI itinerary estimate shown on /api/trips/generate, not the
 price_cache/Stripe booking path - total_cost here is never read into an actual
@@ -15,13 +22,26 @@ import os
 import sys
 import pytest
 import requests
+from pydantic import ValidationError
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from server import _room_count, _scale_per_person_costs  # noqa: E402
+from server import _room_count, _scale_per_person_costs, _fare_units, TripPreferences  # noqa: E402
 
 BASE_URL = os.environ.get('REACT_APP_BACKEND_URL', 'http://localhost:8001').rstrip('/')
 SESSION_TOKEN = os.environ.get('TEST_SESSION_TOKEN', 'test_session_eyv_1780670554293')
 HEADERS = {"Authorization": f"Bearer {SESSION_TOKEN}", "Content-Type": "application/json"}
+
+BASE_PREFS = dict(
+    destination="Goa",
+    starting_location="Mumbai",
+    departure_date="2026-08-01",
+    return_date="2026-08-05",
+    transportation="flight",
+    budget_level="Budget",
+    accommodation=["hotel"],
+    interests=[],
+    trip_type="leisure",
+)
 
 
 # ---------- Room count (accommodation scales by rooms, not travelers) ----------
@@ -172,3 +192,150 @@ def test_group_pricing_scales_correctly_live():
     assert 2.0 <= food_ratio <= 6.0, (
         f"meal cost did not scale with travelers: solo={solo['food']} group={group['food']}"
     )
+
+
+# ---------- TripPreferences: server-derived num_travelers ----------
+
+def test_num_travelers_derived_from_breakdown():
+    prefs = TripPreferences(**BASE_PREFS, adults=2, children=2, seniors=1)
+    assert prefs.num_travelers == 5
+
+
+def test_num_travelers_ignores_client_supplied_value():
+    # A client sending a mismatched/stale num_travelers must never win - this
+    # is exactly the bug: the form's real breakdown always overrides it.
+    prefs = TripPreferences(**BASE_PREFS, adults=2, children=0, seniors=0, num_travelers=999)
+    assert prefs.num_travelers == 2
+
+
+def test_zero_travelers_rejected():
+    with pytest.raises(ValidationError):
+        TripPreferences(**BASE_PREFS, adults=0, children=0, seniors=0)
+
+
+def test_children_only_group_is_valid():
+    prefs = TripPreferences(**BASE_PREFS, adults=0, children=0, seniors=3)
+    assert prefs.num_travelers == 3
+
+
+def test_negative_adults_rejected():
+    with pytest.raises(ValidationError):
+        TripPreferences(**BASE_PREFS, adults=-1, children=0, seniors=0)
+
+
+def test_decimal_adults_rejected():
+    with pytest.raises(ValidationError):
+        TripPreferences(**BASE_PREFS, adults=2.5, children=0, seniors=0)
+
+
+def test_null_adults_rejected():
+    with pytest.raises(ValidationError):
+        TripPreferences(**BASE_PREFS, adults=None, children=0, seniors=0)
+
+
+# ---------- _fare_units: age-aware discount fallback ----------
+# Neither Ignav nor SerpApi exposes child/senior fares, so these are
+# project-defined fallback discounts (see CHILD_FARE_DISCOUNT / SENIOR_FARE_DISCOUNT
+# in server.py) - these tests pin the documented percentages, not provider data.
+
+def test_fare_units_all_adults_equals_headcount():
+    assert _fare_units(4, 0, 0) == 4.0
+
+
+def test_fare_units_children_discounted():
+    assert _fare_units(0, 4, 0) == pytest.approx(4 * 0.75)
+
+
+def test_fare_units_seniors_discounted():
+    assert _fare_units(0, 0, 4) == pytest.approx(4 * 0.90)
+
+
+def test_fare_units_mixed_group():
+    assert _fare_units(2, 2, 1) == pytest.approx(2 * 1.0 + 2 * 0.75 + 1 * 0.90)
+
+
+# ---------- Live regression: the 3 cases from the pricing-pipeline ticket ----------
+
+@pytest.mark.timeout(180)
+def test_regression_mixed_age_group_persists_correct_total_live():
+    """Case 1: adults=2, children=2, seniors=1 -> the persisted trip's stored
+    preferences must reflect num_travelers=5, not the old hardcoded-to-1 bug."""
+    payload = {
+        "destination": "Jaipur",
+        "starting_location": "Delhi",
+        "departure_date": "2026-09-01",
+        "return_date": "2026-09-04",
+        "adults": 2,
+        "children": 2,
+        "seniors": 1,
+        "transportation": "train",
+        "budget_level": "Budget",
+        "accommodation": ["hotel"],
+        "interests": [],
+        "trip_type": "family",
+    }
+    r = requests.post(f"{BASE_URL}/api/trips/generate", json=payload, headers=HEADERS, timeout=180)
+    assert r.status_code == 200, r.text
+    trip_id = r.json()["trip_id"]
+
+    g = requests.get(f"{BASE_URL}/api/trips/{trip_id}", headers=HEADERS)
+    assert g.status_code == 200
+    assert g.json()["preferences"]["num_travelers"] == 5
+
+    requests.delete(f"{BASE_URL}/api/trips/{trip_id}", headers=HEADERS)
+
+
+@pytest.mark.timeout(400)
+def test_regression_mixed_age_group_priced_below_all_adults_live():
+    """Case 2: an all-adults group of 5 vs a mixed-age group of the same
+    headcount (5) - the mixed group should be cheaper given the child/senior
+    fallback discounts, proving age data actually reaches pricing."""
+    base_payload = {
+        "destination": "Coorg",
+        "starting_location": "Bangalore",
+        "departure_date": "2026-09-10",
+        "return_date": "2026-09-14",
+        "transportation": "flight",
+        "budget_level": "Premium",
+        "accommodation": ["hotel"],
+        "interests": ["nature"],
+        "trip_type": "family",
+    }
+
+    def _generate(adults, children, seniors):
+        payload = {**base_payload, "adults": adults, "children": children, "seniors": seniors}
+        r = requests.post(f"{BASE_URL}/api/trips/generate", json=payload, headers=HEADERS, timeout=400)
+        assert r.status_code == 200, r.text
+        plans = r.json()["plans"]
+        plan = next(p for p in plans if p.get("plan_type") == "Premium")
+        return plan["cost_breakdown"]
+
+    all_adults = _generate(5, 0, 0)
+    mixed = _generate(2, 2, 1)
+
+    assert all_adults["transportation"] > 0
+    assert mixed["transportation"] < all_adults["transportation"], (
+        f"mixed-age group (2 adults, 2 children, 1 senior) should cost less than "
+        f"5 adults given the fallback discounts: all_adults={all_adults['transportation']} "
+        f"mixed={mixed['transportation']}"
+    )
+
+
+def test_regression_zero_travelers_rejected_by_api_live():
+    """Case 3: adults=children=seniors=0 must be rejected before any AI/provider call."""
+    payload = {
+        "destination": "Goa",
+        "starting_location": "Mumbai",
+        "departure_date": "2026-09-01",
+        "return_date": "2026-09-04",
+        "adults": 0,
+        "children": 0,
+        "seniors": 0,
+        "transportation": "flight",
+        "budget_level": "Budget",
+        "accommodation": ["hotel"],
+        "interests": [],
+        "trip_type": "leisure",
+    }
+    r = requests.post(f"{BASE_URL}/api/trips/generate", json=payload, headers=HEADERS, timeout=30)
+    assert r.status_code == 422, r.text
