@@ -247,7 +247,7 @@ const BookingPage = ({ user }) => {
   const sortedHotels = useMemo(() => {
     const list = [...hotels];
     if (hotelSort === 'price') list.sort((a, b) => a.price.per_night - b.price.per_night);
-    else if (hotelSort === 'rating') list.sort((a, b) => b.rating - a.rating);
+    else if (hotelSort === 'rating') list.sort((a, b) => (b.rating ?? -1) - (a.rating ?? -1));
     else if (hotelSort === 'stars') list.sort((a, b) => b.stars - a.stars);
     return list;
   }, [hotels, hotelSort]);
@@ -528,10 +528,12 @@ const BookingPage = ({ user }) => {
                             <Star key={i} size={12} className="fill-yellow-400 text-yellow-400" />
                           ))}
                         </div>
-                        {/* Rating badge */}
-                        <div className="absolute top-3 right-3 bg-[#C47245] text-white text-sm font-bold px-2.5 py-1 rounded-lg">
-                          {hotel.rating?.toFixed ? hotel.rating.toFixed(1) : hotel.rating}
-                        </div>
+                        {/* Rating badge - hidden when no real rating data is available */}
+                        {(hotel.rating ?? null) !== null && (
+                          <div className="absolute top-3 right-3 bg-[#C47245] text-white text-sm font-bold px-2.5 py-1 rounded-lg">
+                            {hotel.rating?.toFixed ? hotel.rating.toFixed(1) : hotel.rating}
+                          </div>
+                        )}
                       </div>
 
                       <div className="p-5">

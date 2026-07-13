@@ -107,8 +107,10 @@ def _transform_serpapi_hotels(properties: List[Dict], nights: int, currency: str
 
             # Overall rating (out of 10 scale to match our mock format)
             raw_rating = prop.get('overall_rating', 0) or 0
-            # SerpApi ratings are out of 5 - convert to our 10-point scale
-            rating = round(raw_rating * 2, 1) if raw_rating > 0 else round(7.5 + stars * 0.3, 1)
+            # SerpApi ratings are out of 5 - convert to our 10-point scale.
+            # No rating from real review data means we report none - never
+            # invent one from the star class.
+            rating = round(raw_rating * 2, 1) if raw_rating > 0 else None
 
             # Review count
             review_count = prop.get('reviews', 0) or 0

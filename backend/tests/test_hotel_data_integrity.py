@@ -95,6 +95,14 @@ def test_rating_matches_provider_overall_rating():
     assert hotels[0]["rating"] == round(4.2 * 2, 1)
 
 
+def test_rating_absent_when_provider_has_no_rating():
+    """When SerpApi has no real review data (overall_rating == 0), the
+    rating must be reported as absent - never derived from the star class."""
+    props = [_prop("Hotel Alpha", 5000, 4, 0)]
+    hotels = _transform_serpapi_hotels(props, nights=1, currency="INR")
+    assert hotels[0]["rating"] is None
+
+
 # ---------- Tier Selection (selection only, no mutation) ----------
 
 def test_tier_selection_picks_real_distinct_prices():
@@ -190,6 +198,7 @@ def test_no_multiplier_patterns_in_serpapi_service_source():
     banned_snippets = [
         "* 1.4", "* 1.6", "budget_bucket", "premium_bucket", "luxury_bucket",
         "max(h['stars']", 'max(h["stars"]',
+        "7.5 + stars", "7.5+stars",
     ]
     for snippet in banned_snippets:
         assert snippet not in source, f"fabrication pattern reintroduced: {snippet!r}"
