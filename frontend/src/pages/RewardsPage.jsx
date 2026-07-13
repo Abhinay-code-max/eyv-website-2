@@ -77,12 +77,12 @@ const RewardsPage = ({ user }) => {
     : 100;
 
   const earnActions = [
-    { icon: Plane,    action: 'booking_flight',      label: 'Flight Booking',    points: data.earn_rules.booking_flight },
-    { icon: Hotel,    action: 'booking_hotel',        label: 'Hotel Booking',     points: data.earn_rules.booking_hotel },
-    { icon: Star,     action: 'trip_completed',       label: 'Trip Completed',    points: data.earn_rules.trip_completed },
-    { icon: Sparkles, action: 'first_booking_bonus',  label: 'First Booking Bonus', points: data.earn_rules.first_booking_bonus },
-    { icon: Award,    action: 'premium_subscription', label: 'Premium Signup',    points: data.earn_rules.premium_subscription },
-    { icon: Users,    action: 'referral',             label: 'Referral',          points: data.earn_rules.referral },
+    { icon: Plane,    action: 'booking_flight',      label: 'Flight Booking',    points: data.earn_rules.booking_flight,      route: '/bookings' },
+    { icon: Hotel,    action: 'booking_hotel',        label: 'Hotel Booking',     points: data.earn_rules.booking_hotel,       route: '/bookings' },
+    { icon: Star,     action: 'trip_completed',       label: 'Trip Completed',    points: data.earn_rules.trip_completed,      route: null },
+    { icon: Sparkles, action: 'first_booking_bonus',  label: 'First Booking Bonus', points: data.earn_rules.first_booking_bonus, route: '/bookings' },
+    { icon: Award,    action: 'premium_subscription', label: 'Premium Signup',    points: data.earn_rules.premium_subscription, route: '/premium' },
+    { icon: Users,    action: 'referral',             label: 'Referral',          points: data.earn_rules.referral,            route: null },
   ];
 
   return (
@@ -224,8 +224,11 @@ const RewardsPage = ({ user }) => {
               <motion.div key={action.action}
                 variants={fadeUp} custom={idx} initial="hidden" whileInView="show"
                 viewport={{ once: true }}
-                whileHover={{ x: 4, backgroundColor: '#FEF3EC' }}
-                className="flex items-center gap-4 p-4 bg-[#F5F2EB] rounded-2xl transition-all cursor-default">
+                whileHover={action.route ? { x: 4, backgroundColor: '#FEF3EC' } : undefined}
+                onClick={action.route ? () => navigate(action.route) : undefined}
+                className={`flex items-center gap-4 p-4 bg-[#F5F2EB] rounded-2xl transition-all ${
+                  action.route ? 'cursor-pointer' : 'cursor-default'
+                }`}>
                 <motion.div whileHover={{ scale: 1.15, rotate: 10 }}
                   className="bg-white p-3 rounded-xl shadow-sm">
                   <action.icon size={22} className="text-[#C47245]" />
@@ -234,7 +237,7 @@ const RewardsPage = ({ user }) => {
                   <p className="font-medium text-[#1C1917] text-sm">{action.label}</p>
                   <p className="text-[#C47245] font-bold text-base">+{action.points} pts</p>
                 </div>
-                <ChevronRight size={16} className="text-[#C47245] opacity-50" />
+                {action.route && <ChevronRight size={16} className="text-[#C47245] opacity-50" />}
               </motion.div>
             ))}
           </div>
