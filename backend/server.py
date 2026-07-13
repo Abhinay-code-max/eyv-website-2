@@ -825,6 +825,8 @@ MEAL AND ACTIVITY PRICING (group size = {num_travelers}):
                 "Limited hotel options are available for this destination - "
                 "Budget/Premium/Luxury tiers may share the same or similarly priced hotel."
             )
+        if is_train:
+            plan_data['train_placeholder_pricing'] = True
         return plan_data
 
       except Exception as e:

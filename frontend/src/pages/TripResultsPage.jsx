@@ -358,6 +358,11 @@ const TripResultsPage = () => {
                     {selectedPlan.hotel_inventory_note}
                   </div>
                 )}
+                {selectedPlan.train_placeholder_pricing && (
+                  <div className="mt-6 pt-6 border-t border-[#E7E5E4] text-sm text-[#57534E] italic">
+                    Estimated train fares — not live pricing. Check IRCTC or Rome2rio for current fares.
+                  </div>
+                )}
                 {selectedPlan.budget_tips?.length > 0 && (
                   <div className="mt-6 pt-6 border-t border-[#E7E5E4]">
                     <h4 className="text-xs uppercase tracking-wider font-medium mb-3" style={{ color: ps.accent }}>
