@@ -169,10 +169,14 @@ const HomePage = () => {
   const destinations = showAllDest ? allDestinations : allDestinations.slice(0, 3);
 
   const features = [
-    { icon: Plane, title: 'Flight Booking', description: 'Best flight deals aggregated from top airlines' },
-    { icon: Hotel, title: 'Hotels & Resorts', description: 'Curated accommodations for every budget' },
-    { icon: Utensils, title: 'Dining', description: 'Restaurant recommendations and reservations' },
-    { icon: Activity, title: 'Activities', description: 'Experiences from adventure to relaxation' },
+    { icon: Plane, title: 'Flight Booking', description: 'Best flight deals aggregated from top airlines',
+      onClick: () => navigate('/bookings', { state: { tab: 'flights' } }) },
+    { icon: Hotel, title: 'Hotels & Resorts', description: 'Curated accommodations for every budget',
+      onClick: () => navigate('/bookings', { state: { tab: 'hotels' } }) },
+    { icon: Utensils, title: 'Dining', description: 'Restaurant recommendations and reservations',
+      onClick: () => navigate('/trip-planner') },
+    { icon: Activity, title: 'Activities', description: 'Experiences from adventure to relaxation',
+      onClick: () => navigate('/trip-planner') },
   ];
 
   const navLinks = [
@@ -437,7 +441,8 @@ const HomePage = () => {
             {features.map((feature, idx) => (
               <motion.div key={idx} variants={fadeUp} custom={idx} initial="hidden"
                 whileInView="show" viewport={{ once: true }} whileHover={{ y: -6 }}
-                className="group bg-white p-8 rounded-2xl border border-[#E7E5E4] hover:border-[#C47245]/40 hover:shadow-xl transition-all duration-300">
+                onClick={feature.onClick}
+                className="group bg-white p-8 rounded-2xl border border-[#E7E5E4] cursor-pointer hover:border-[#C47245]/40 hover:shadow-xl transition-all duration-300">
                 <div className="w-14 h-14 rounded-2xl bg-[#C47245]/10 flex items-center justify-center mb-5 transition-colors group-hover:bg-[#C47245]">
                   <feature.icon size={26} className="text-[#C47245] transition-colors group-hover:text-white" />
                 </div>

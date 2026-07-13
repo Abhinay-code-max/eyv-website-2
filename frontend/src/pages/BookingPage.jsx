@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -153,9 +153,14 @@ const SortBar = ({ sort, setSort, filter, setFilter, options }) => (
 );
 
 /* ── Page ──────────────────────────────────────────────────────────────── */
+const VALID_TABS = ['flights', 'hotels', 'bookings'];
+
 const BookingPage = ({ user }) => {
   const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState('flights');
+  const location = useLocation();
+  const [activeTab, setActiveTab] = useState(
+    VALID_TABS.includes(location.state?.tab) ? location.state.tab : 'flights'
+  );
   const [loading, setLoading] = useState(false);
   const [flights, setFlights] = useState([]);
   const [hotels, setHotels] = useState([]);
