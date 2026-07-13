@@ -1,5 +1,10 @@
 export const API_URL = process.env.REACT_APP_BACKEND_URL + '/api';
 
+// sessionStorage key used to carry the intended post-login destination
+// (pathname + state) across the Google OAuth hard-redirect, which drops
+// React Router state since the SPA fully unloads during that trip.
+export const POST_LOGIN_REDIRECT_KEY = 'eyv_post_login_redirect';
+
 export const BUDGET_LEVELS = [
   { value: 'Budget', label: 'Budget', description: 'Most economical options' },
   { value: 'Premium', label: 'Premium', description: 'Best value for comfort' },

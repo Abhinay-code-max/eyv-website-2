@@ -144,7 +144,15 @@ const HomePage = () => {
     travelers: 1,
   });
 
-  const handleSearch = () => navigate('/login');
+  const handleSearch = () => navigate('/trip-planner', {
+    state: {
+      destination: searchData.destination,
+      starting_location: searchData.startLocation,
+      departure_date: searchData.departureDate,
+      return_date: searchData.returnDate,
+      adults: searchData.travelers,
+    },
+  });
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 40);

@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
+import { useLocation } from 'react-router-dom';
 import { motion, useReducedMotion } from 'framer-motion';
 import { LogIn, Globe, Plane, MapPin, Calendar, Users, Sparkles, Star } from 'lucide-react';
 import EYVLogo from '../components/EYVLogo';
 import { AUTH } from '../constants/testIds';
-import { API_URL } from '../constants';
+import { API_URL, POST_LOGIN_REDIRECT_KEY } from '../constants';
 
 /* ── tiny floating particle ───────────────────────────────────────── */
 const PARTICLES = Array.from({ length: 18 }, (_, i) => ({
@@ -47,6 +48,7 @@ const FlightPath = () => (
 
 const LoginPage = () => {
   const reduce = useReducedMotion();
+  const location = useLocation();
   const [glowPulse, setGlowPulse] = useState(false);
 
   // subtle glow throb after initial entrance
@@ -56,6 +58,23 @@ const LoginPage = () => {
   }, []);
 
   const handleGoogleLogin = () => {
+    // The Google OAuth round trip is a hard browser redirect (SPA fully
+    // unloads), so React Router state can't survive it - stash the page
+    // the user was trying to reach in sessionStorage and let AuthCallback
+    // pick it back up once the session is established.
+    const from = location.state?.from;
+    if (from) {
+      sessionStorage.setItem(
+        POST_LOGIN_REDIRECT_KEY,
+        JSON.stringify({ pathname: from.pathname, state: from.state })
+      );
+    } else {
+      // Reaching /login with no redirect context (e.g. the plain "Sign In"
+      // nav link) means this is a fresh login, not a continuation of an
+      // earlier redirect - drop any stale entry from an abandoned attempt
+      // so it can't hijack this one.
+      sessionStorage.removeItem(POST_LOGIN_REDIRECT_KEY);
+    }
     window.location.href = `${API_URL}/auth/google/login`;
   };
 

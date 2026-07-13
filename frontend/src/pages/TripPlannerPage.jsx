@@ -20,10 +20,10 @@ const TripPlannerPage = ({ user }) => {
   const [loading, setLoading] = useState(false);
   const [formData, setFormData] = useState({
     destination: location.state?.destination || '',
-    starting_location: '',
-    departure_date: '',
-    return_date: '',
-    adults: 1,
+    starting_location: location.state?.starting_location || '',
+    departure_date: location.state?.departure_date || '',
+    return_date: location.state?.return_date || '',
+    adults: Number(location.state?.adults) || 1,
     children: 0,
     seniors: 0,
     transportation: 'Train',

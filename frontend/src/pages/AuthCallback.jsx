@@ -1,7 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import axios from 'axios';
-import { API_URL } from '../constants';
+import { API_URL, POST_LOGIN_REDIRECT_KEY } from '../constants';
 import LoadingAnimation from '../components/LoadingAnimation';
 
 const AuthCallback = () => {
@@ -32,7 +32,25 @@ const AuthCallback = () => {
         );
 
         if (response.data.user) {
-          navigate('/dashboard', { state: { user: response.data.user }, replace: true });
+          // Restore the page the user was trying to reach before being sent
+          // to log in (e.g. a Popular Destinations card pre-filling the trip
+          // planner). Falls back to /dashboard when nothing was stashed.
+          let targetPathname = '/dashboard';
+          let targetState = {};
+          const stashed = sessionStorage.getItem(POST_LOGIN_REDIRECT_KEY);
+          if (stashed) {
+            sessionStorage.removeItem(POST_LOGIN_REDIRECT_KEY);
+            try {
+              const parsed = JSON.parse(stashed);
+              if (parsed?.pathname) {
+                targetPathname = parsed.pathname;
+                targetState = parsed.state || {};
+              }
+            } catch (e) {
+              console.error('Failed to parse stashed post-login redirect:', e);
+            }
+          }
+          navigate(targetPathname, { state: { ...targetState, user: response.data.user }, replace: true });
         } else {
           navigate('/login');
         }
