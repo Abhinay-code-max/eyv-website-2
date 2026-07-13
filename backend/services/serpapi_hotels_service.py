@@ -169,41 +169,11 @@ def _transform_serpapi_hotels(properties: List[Dict], nights: int, currency: str
     if not hotels:
         return []
 
-    # Sort by price ascending
-    hotels_sorted = sorted(hotels, key=lambda h: h['price']['per_night'])
-
-    # Enforce star-based tier bucketing so Budget < Premium < Luxury always holds.
-    # We split the sorted list into thirds and enforce star ordering within each bucket.
-    n = len(hotels_sorted)
-    if n >= 3:
-        third = n // 3
-        budget_bucket  = hotels_sorted[:third]           # cheapest
-        premium_bucket = hotels_sorted[third:2*third]    # mid range
-        luxury_bucket  = hotels_sorted[2*third:]         # most expensive
-
-        # Guarantee price floors: Premium must cost >= max(Budget), Luxury >= max(Premium)
-        max_budget_price  = max(h['price']['per_night'] for h in budget_bucket)
-        max_premium_price = max(h['price']['per_night'] for h in premium_bucket) if premium_bucket else max_budget_price
-
-        for h in premium_bucket:
-            if h['price']['per_night'] <= max_budget_price:
-                h['price']['per_night'] = round(max_budget_price * 1.4, 2)
-                h['price']['total'] = round(h['price']['per_night'] * h['nights'], 2)
-
-        for h in luxury_bucket:
-            if h['price']['per_night'] <= max_premium_price:
-                h['price']['per_night'] = round(max_premium_price * 1.6, 2)
-                h['price']['total'] = round(h['price']['per_night'] * h['nights'], 2)
-
-        # Upgrade star ratings to match tier expectations
-        for h in premium_bucket:
-            h['stars'] = max(h['stars'], 4)
-        for h in luxury_bucket:
-            h['stars'] = max(h['stars'], 5)
-
-        return budget_bucket + premium_bucket + luxury_bucket
-
-    return hotels_sorted
+    # Sort by real provider price ascending. Every field on each hotel dict
+    # (name, price, stars, rating, booking_url, ...) is exactly what SerpApi
+    # returned - callers that need Budget/Premium/Luxury tiers select from
+    # this list (see server._select_tier_hotel), they never edit it.
+    return sorted(hotels, key=lambda h: h['price']['per_night'])
 
 
 def _extract_stars(hotel_class_raw: str) -> int:

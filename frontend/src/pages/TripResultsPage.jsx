@@ -353,6 +353,11 @@ const TripResultsPage = () => {
                     </div>
                   ))}
                 </div>
+                {selectedPlan.hotel_inventory_note && (
+                  <div className="mt-6 pt-6 border-t border-[#E7E5E4] text-sm text-[#57534E] italic">
+                    {selectedPlan.hotel_inventory_note}
+                  </div>
+                )}
                 {selectedPlan.budget_tips?.length > 0 && (
                   <div className="mt-6 pt-6 border-t border-[#E7E5E4]">
                     <h4 className="text-xs uppercase tracking-wider font-medium mb-3" style={{ color: ps.accent }}>
