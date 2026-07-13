@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { MapPin, Calendar, Users, Plane, DollarSign, Hotel, Heart, ChevronRight, ChevronLeft, Sparkles } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import axios from 'axios';
 import { API_URL, TRANSPORTATION_OPTIONS, ACCOMMODATION_OPTIONS, INTERESTS, TRIP_TYPES, BUDGET_LEVELS } from '../constants';
 import { TRIP_PLANNER } from '../constants/testIds';
@@ -15,10 +15,11 @@ import { getTotalTravelers, validateTravelers } from '../lib/travelers';
 
 const TripPlannerPage = ({ user }) => {
   const navigate = useNavigate();
+  const location = useLocation();
   const [step, setStep] = useState(1);
   const [loading, setLoading] = useState(false);
   const [formData, setFormData] = useState({
-    destination: '',
+    destination: location.state?.destination || '',
     starting_location: '',
     departure_date: '',
     return_date: '',

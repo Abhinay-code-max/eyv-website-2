@@ -9,7 +9,7 @@ import {
 } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
 import {
-  MapPin, Calendar, Users, Search, Plane, Hotel, Utensils, Activity,
+  Calendar, Users, Search, Plane, Hotel, Utensils, Activity,
   Star, ChevronRight, Globe, Compass, Menu, X, ArrowRight, Sparkles,
   CheckCircle2, ChevronDown,
 } from 'lucide-react';
@@ -19,39 +19,6 @@ import LocationAutocomplete from '../components/LocationAutocomplete';
 import ScrollPlane from '../components/ScrollPlane';
 
 /* ─── tiny helpers ──────────────────────────────────────────────────── */
-
-const useCountUp = (target, inView, duration = 1600) => {
-  const [value, setValue] = useState(0);
-  useEffect(() => {
-    if (!inView) return;
-    let raf;
-    const start = performance.now();
-    const tick = (now) => {
-      const p = Math.min((now - start) / duration, 1);
-      setValue(target * (1 - Math.pow(1 - p, 3)));
-      if (p < 1) raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, [inView, target, duration]);
-  return value;
-};
-
-const Stat = ({ value, suffix = '', label }) => {
-  const ref = useRef(null);
-  const inView = useInView(ref, { once: true, margin: '-60px' });
-  const n = useCountUp(value, inView);
-  const display = Number.isInteger(value) ? Math.round(n).toLocaleString() : n.toFixed(1);
-  return (
-    <div ref={ref} className="text-center">
-      <div className="text-4xl md:text-5xl font-semibold text-[#1C1917] tracking-tight"
-        style={{ fontFamily: 'Cormorant Garamond, serif' }}>
-        {display}{suffix}
-      </div>
-      <div className="mt-2 text-xs uppercase tracking-[0.18em] text-[#57534E]">{label}</div>
-    </div>
-  );
-};
 
 const RouteDivider = ({ className = '' }) => {
   const ref = useRef(null);
@@ -192,12 +159,12 @@ const HomePage = () => {
   const heroScale = useTransform(scrollYProgress, [0, 1], [1, 1.12]);
 
   const allDestinations = [
-    { name: 'Maldives', image: 'https://images.pexels.com/photos/6875499/pexels-photo-6875499.jpeg', trips: '2,340 trips', tag: 'Beach' },
-    { name: 'Switzerland', image: 'https://images.unsplash.com/photo-1558883493-8b86ff880fec', trips: '1,890 trips', tag: 'Mountains' },
-    { name: 'Bali', image: 'https://images.pexels.com/photos/25706808/pexels-photo-25706808.jpeg', trips: '3,120 trips', tag: 'Culture' },
-    { name: 'Japan', image: 'https://images.pexels.com/photos/2187605/pexels-photo-2187605.jpeg', trips: '2,760 trips', tag: 'Culture' },
-    { name: 'Santorini', image: 'https://images.pexels.com/photos/1010657/pexels-photo-1010657.jpeg', trips: '1,540 trips', tag: 'Beach' },
-    { name: 'Dubai', image: 'https://images.pexels.com/photos/162031/dubai-tower-arab-khalifa-162031.jpeg', trips: '4,200 trips', tag: 'Luxury' },
+    { name: 'Maldives', image: 'https://images.pexels.com/photos/6875499/pexels-photo-6875499.jpeg', tag: 'Beach' },
+    { name: 'Switzerland', image: 'https://images.unsplash.com/photo-1558883493-8b86ff880fec', tag: 'Mountains' },
+    { name: 'Bali', image: 'https://images.pexels.com/photos/25706808/pexels-photo-25706808.jpeg', tag: 'Culture' },
+    { name: 'Japan', image: 'https://images.pexels.com/photos/2187605/pexels-photo-2187605.jpeg', tag: 'Culture' },
+    { name: 'Santorini', image: 'https://images.pexels.com/photos/1010657/pexels-photo-1010657.jpeg', tag: 'Beach' },
+    { name: 'Dubai', image: 'https://images.pexels.com/photos/162031/dubai-tower-arab-khalifa-162031.jpeg', tag: 'Luxury' },
   ];
   const destinations = showAllDest ? allDestinations : allDestinations.slice(0, 3);
 
@@ -206,19 +173,6 @@ const HomePage = () => {
     { icon: Hotel, title: 'Hotels & Resorts', description: 'Curated accommodations for every budget' },
     { icon: Utensils, title: 'Dining', description: 'Restaurant recommendations and reservations' },
     { icon: Activity, title: 'Activities', description: 'Experiences from adventure to relaxation' },
-  ];
-
-  const reviews = [
-    { name: 'Sarah M.', text: 'EYV planned our entire Maldives trip perfectly. The AI suggestions were spot-on!', rating: 5, location: 'Mumbai' },
-    { name: 'Raj K.', text: 'Saved hours of research. The Luxury plan was incredible value for money.', rating: 5, location: 'Bangalore' },
-    { name: 'Emily L.', text: 'The AI chatbot was so helpful during our trip. Couldn\'t recommend more!', rating: 5, location: 'Delhi' },
-  ];
-
-  const stats = [
-    { value: 50000, suffix: '+', label: 'Trips Planned' },
-    { value: 120, suffix: '+', label: 'Countries' },
-    { value: 4.9, suffix: '', label: 'Avg. Rating' },
-    { value: 98, suffix: '%', label: 'Would Rebook' },
   ];
 
   const navLinks = [
@@ -399,10 +353,14 @@ const HomePage = () => {
         )}
       </section>
 
-      {/* ── Stats ── */}
-      <section className="py-16 px-6 border-b border-[#E7E5E4]">
-        <div className="max-w-7xl mx-auto grid grid-cols-2 md:grid-cols-4 gap-10">
-          {stats.map((s, idx) => <Stat key={idx} value={s.value} suffix={s.suffix} label={s.label} />)}
+      {/* ── Honest beta banner ── */}
+      <section className="py-10 px-6 border-b border-[#E7E5E4]">
+        <div className="max-w-7xl mx-auto flex flex-col md:flex-row items-center justify-center gap-3 md:gap-6 text-center text-sm uppercase tracking-[0.18em] text-[#57534E]">
+          <span>Built in Hyderabad</span>
+          <span className="hidden md:inline text-[#C47245]">·</span>
+          <span>Currently in beta</span>
+          <span className="hidden md:inline text-[#C47245]">·</span>
+          <span>Join us and help shape EYV</span>
         </div>
       </section>
 
@@ -427,6 +385,7 @@ const HomePage = () => {
                   variants={fadeUp} custom={idx % 3} initial="hidden" whileInView="show"
                   viewport={{ once: true }} whileHover={{ y: -8 }}
                   exit={{ opacity: 0, scale: 0.95 }}
+                  onClick={() => navigate('/trip-planner', { state: { destination: dest.name } })}
                   className="group relative overflow-hidden rounded-3xl border border-[#E7E5E4] cursor-pointer shadow-sm hover:shadow-2xl transition-shadow duration-500">
                   <div className="aspect-[4/5] overflow-hidden">
                     <img src={dest.image} alt={dest.name}
@@ -440,8 +399,7 @@ const HomePage = () => {
                   </div>
                   <div className="absolute bottom-0 left-0 right-0 p-6 text-white">
                     <h3 className="text-2xl font-medium mb-1" style={{ fontFamily: 'Cormorant Garamond, serif' }}>{dest.name}</h3>
-                    <p className="text-white/80 text-sm">{dest.trips}</p>
-                    <span className="mt-3 inline-flex items-center gap-1 text-sm text-[#E9C9A0] opacity-0 -translate-y-1 transition-all duration-300 group-hover:opacity-100 group-hover:translate-y-0">
+                    <span className="inline-flex items-center gap-1 text-sm text-[#E9C9A0] opacity-0 -translate-y-1 transition-all duration-300 group-hover:opacity-100 group-hover:translate-y-0">
                       Explore <ChevronRight size={16} />
                     </span>
                   </div>
@@ -710,41 +668,20 @@ const HomePage = () => {
 
       <RouteDivider className="py-4" />
 
-      {/* ── Reviews ── */}
+      {/* ── Beta ── */}
       <section className="py-24 px-6">
-        <div className="max-w-7xl mx-auto">
-          <motion.div variants={fadeUp} initial="hidden" whileInView="show" viewport={{ once: true }}
-            className="text-center mb-16">
-            <span className="text-xs uppercase tracking-[0.25em] font-medium text-[#C47245]">Loved By Travelers</span>
+        <div className="max-w-3xl mx-auto text-center">
+          <motion.div variants={fadeUp} initial="hidden" whileInView="show" viewport={{ once: true }}>
+            <span className="text-xs uppercase tracking-[0.25em] font-medium text-[#C47245]">Early Days</span>
             <h2 className="text-4xl md:text-5xl font-semibold text-[#1C1917] mt-3 mb-4"
               style={{ fontFamily: 'Cormorant Garamond, serif' }}>
-              What Travelers Say
+              Join Us in Beta
             </h2>
-            <p className="text-lg text-[#57534E]">Real stories from real vacations</p>
+            <p className="text-lg text-[#57534E]">
+              EYV is a new AI travel planner, built in Hyderabad and currently in beta.
+              We're building this with real travelers — try it out and help shape what comes next.
+            </p>
           </motion.div>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-            {reviews.map((review, idx) => (
-              <motion.div key={idx} variants={fadeUp} custom={idx} initial="hidden"
-                whileInView="show" viewport={{ once: true }} whileHover={{ y: -6 }}
-                className="bg-white p-8 rounded-3xl border border-[#E7E5E4] hover:shadow-xl transition-shadow duration-300">
-                <div className="flex gap-1 mb-4">
-                  {[...Array(review.rating)].map((_, i) => (
-                    <Star key={i} size={18} className="fill-[#C47245] text-[#C47245]" />
-                  ))}
-                </div>
-                <p className="text-[#1C1917] mb-6 italic"
-                  style={{ fontFamily: 'Cormorant Garamond, serif', fontSize: '1.15rem' }}>
-                  "{review.text}"
-                </p>
-                <div className="flex items-center justify-between">
-                  <p className="text-[#C47245] font-medium text-sm uppercase tracking-wider">{review.name}</p>
-                  <span className="flex items-center gap-1 text-xs text-[#57534E]">
-                    <MapPin size={12} /> {review.location}
-                  </span>
-                </div>
-              </motion.div>
-            ))}
-          </div>
         </div>
       </section>
 
@@ -794,9 +731,9 @@ const HomePage = () => {
             <div>
               <h4 className="text-xs uppercase tracking-[0.18em] text-[#1C1917] font-semibold mb-4">Company</h4>
               <ul className="space-y-3 text-sm text-[#57534E]">
-                <li><span className="hover:text-[#C47245] transition-colors cursor-pointer">Careers</span></li>
-                <li><span className="hover:text-[#C47245] transition-colors cursor-pointer">Press</span></li>
-                <li><span className="hover:text-[#C47245] transition-colors cursor-pointer">Contact</span></li>
+                <li>Careers</li>
+                <li>Press</li>
+                <li>Contact</li>
               </ul>
             </div>
             <div>
