@@ -1,5 +1,5 @@
 from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, UploadFile, File, Header, Query
-from fastapi.responses import StreamingResponse, RedirectResponse
+from fastapi.responses import StreamingResponse, RedirectResponse, JSONResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -30,6 +30,10 @@ from services import ignav_service as duffel_service  # Ignav replaces Sky Scrap
 from services import serpapi_hotels_service
 from services import price_cache_service
 from services import log_redaction
+from services import quota_service, usage_service
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
@@ -49,9 +53,91 @@ GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
 OAUTH_TICKET_TTL_SECONDS = 300
+ADMIN_API_KEY = os.environ.get('ADMIN_API_KEY')
 
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
+
+# ── Rate limiting ────────────────────────────────────────────────────────
+# In-memory storage: no Redis in this deployment (single process, no
+# multi-worker/multi-instance setup) - if that changes, point these at
+# Redis instead so limits are shared across processes.
+#
+# One Limiter instance, stacked twice on /trips/generate with different
+# key_funcs (IP and session token) - both accumulate onto the SAME route's
+# limit list and are evaluated together per request. Two *separate* Limiter
+# instances would NOT both fire: slowapi's per-route wrapper sets
+# request.state._rate_limiting_complete after the first one runs, and every
+# later decorator on the same route (even from a different Limiter) skips
+# its own check because of that flag. Keying by session token/bearer value
+# (not a resolved user_id) avoids an async DB lookup inside a sync key_func;
+# falls back to IP for unauthenticated requests (get_current_user rejects
+# those with 401 inside the handler anyway).
+#
+# These are a coarse "stop scripted loops" backstop, not the main control -
+# the real per-user control is the daily quota further down (quota_service),
+# which Premium accounts are exempt from.
+def _session_token_key(request: Request) -> str:
+    token = request.cookies.get("session_token")
+    if not token:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[len("Bearer "):]
+    return token or get_remote_address(request)
+
+
+limiter = Limiter(key_func=get_remote_address)
+
+
+async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded):
+    response = JSONResponse(
+        status_code=429,
+        content={
+            "detail": "Too many requests - please slow down and try again shortly.",
+            "reason": "rate_limited",
+        },
+    )
+    # exc.limit.limit is the underlying limits.RateLimitItem (e.g. "5 per
+    # minute") - GRANULARITY[0] * multiples gives the window length in
+    # seconds. An approximation (window length, not exact time left in the
+    # current window), but simple and always correct.
+    try:
+        item = exc.limit.limit
+        response.headers["Retry-After"] = str(item.GRANULARITY[0] * item.multiples)
+    except Exception:
+        pass
+    return response
+
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
+
+
+# ── Daily free-tier generation quota ─────────────────────────────────────
+# The durable per-user control (unlike the rate limits above, which only
+# guard against short bursts). See services/quota_service.py.
+class QuotaExceededError(Exception):
+    def __init__(self, used: int, limit: int):
+        self.used = used
+        self.limit = limit
+
+
+async def quota_exceeded_handler(request: Request, exc: QuotaExceededError):
+    return JSONResponse(
+        status_code=429,
+        content={
+            "detail": (
+                f"You've used your {exc.limit} free trip generations today - "
+                "upgrade to Premium for unlimited planning."
+            ),
+            "reason": "quota_exceeded",
+            "used": exc.used,
+            "limit": exc.limit,
+        },
+    )
+
+
+app.add_exception_handler(QuotaExceededError, quota_exceeded_handler)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -176,6 +262,27 @@ async def get_current_user(request: Request) -> User:
         user_doc['created_at'] = datetime.fromisoformat(user_doc['created_at'])
     
     return User(**user_doc)
+
+
+async def is_user_premium(user_id: str) -> bool:
+    """Mirrors the active-and-not-expired check in GET /subscription/status,
+    minus that endpoint's side-effecting write-back of expired status (not
+    worth an extra write on every quota check - that endpoint already keeps
+    the stored status current whenever the user views it)."""
+    user_doc = await db.users.find_one(
+        {'user_id': user_id},
+        {'_id': 0, 'premium_status': 1, 'premium_expires_at': 1}
+    )
+    if not user_doc or user_doc.get('premium_status') != 'active':
+        return False
+    expires_at = user_doc.get('premium_expires_at')
+    if not expires_at:
+        return True
+    if isinstance(expires_at, str):
+        expires_at = datetime.fromisoformat(expires_at)
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    return expires_at >= datetime.now(timezone.utc)
 
 # Auth Routes
 @api_router.get("/auth/google/login")
@@ -338,14 +445,23 @@ async def logout(request: Request, response: Response):
 
 # Trip Planning Routes
 @api_router.post("/trips/generate")
+@limiter.limit("5/minute")  # per-IP - stops a scripted loop from one source
+@limiter.limit("5/minute", key_func=_session_token_key)  # per-authenticated-user
 async def generate_trip_plans(preferences: TripPreferences, request: Request):
     user = await get_current_user(request)
-    
+
+    # Daily free-tier quota - the durable control, not just a burst guard.
+    # Premium accounts are exempt entirely.
+    if not await is_user_premium(user.user_id):
+        quota = await quota_service.try_consume_trip_generation(db, user.user_id)
+        if not quota["allowed"]:
+            raise QuotaExceededError(used=quota["used"], limit=quota["limit"])
+
     trip_id = f"trip_{uuid.uuid4().hex[:12]}"
-    
+
     # Store preferences
     preferences_dict = preferences.model_dump()
-    
+
     # Generate 3 plans in parallel using AI
     plan_tasks = [
         generate_single_plan(preferences_dict, plan_type, trip_id, user.user_id)
@@ -365,8 +481,66 @@ async def generate_trip_plans(preferences: TripPreferences, request: Request):
     }
     
     await db.trips.insert_one(saved_trip)
-    
+
     return {"trip_id": trip_id, "plans": plans}
+
+
+REGENERATE_PLAN_TYPES = ("Budget", "Premium", "Luxury")
+
+
+@api_router.post("/trips/{trip_id}/regenerate/{plan_type}")
+@limiter.limit("5/minute")  # per-IP - same guard as /trips/generate, still a real Gemini call
+@limiter.limit("5/minute", key_func=_session_token_key)  # per-authenticated-user
+async def regenerate_trip_plan(trip_id: str, plan_type: str, request: Request):
+    """Re-run generation for a single tier of an existing trip (e.g. after
+    that tier's original generation failed) without touching the other two
+    tiers or re-fetching flight/hotel anchor data that already succeeded."""
+    user = await get_current_user(request)
+
+    if plan_type not in REGENERATE_PLAN_TYPES:
+        raise HTTPException(status_code=400, detail=f"plan_type must be one of {list(REGENERATE_PLAN_TYPES)}")
+
+    # Scoping the lookup to user_id doubles as the ownership check - a
+    # trip_id that doesn't exist and one that belongs to someone else both
+    # come back as the same 404, so this never leaks whether a given
+    # trip_id exists for another account.
+    trip = await db.trips.find_one(
+        {"trip_id": trip_id, "user_id": user.user_id},
+        {"_id": 0}
+    )
+    if not trip:
+        raise HTTPException(status_code=404, detail="Trip not found")
+
+    plans = trip.get("plans", [])
+    plan_index = next((i for i, p in enumerate(plans) if p.get("plan_type") == plan_type), None)
+    if plan_index is None:
+        raise HTTPException(status_code=404, detail=f"No {plan_type} plan found on this trip")
+
+    # Daily free-tier quota - regenerating one tier is still a real Gemini
+    # call, gated the same way as the original /trips/generate. Premium
+    # accounts are exempt entirely, same as generate_trip_plans above.
+    if not await is_user_premium(user.user_id):
+        quota = await quota_service.try_consume_trip_generation(db, user.user_id)
+        if not quota["allowed"]:
+            raise QuotaExceededError(used=quota["used"], limit=quota["limit"])
+
+    # Reuse the previously-fetched flight/train + hotel anchor for this tier
+    # if we have one - avoids an unnecessary Duffel/SerpApi call for pricing
+    # that hasn't changed. Older trips saved before anchor_pricing existed
+    # fall back to a fresh fetch inside generate_single_plan.
+    cached_anchor = plans[plan_index].get("anchor_pricing")
+
+    regenerated = await generate_single_plan(
+        trip["preferences"], plan_type, trip_id, user.user_id, anchor=cached_anchor
+    )
+
+    await db.trips.update_one(
+        {"trip_id": trip_id, "user_id": user.user_id},
+        {"$set": {f"plans.{plan_index}": regenerated, "updated_at": datetime.now(timezone.utc).isoformat()}},
+    )
+
+    return {"trip_id": trip_id, "plan_type": plan_type, "plan": regenerated}
+
 
 ROOM_OCCUPANCY = 2  # standard double-occupancy hotel room
 
@@ -433,6 +607,8 @@ def _scale_per_person_costs(itinerary: Dict[str, Any], num_travelers: int) -> No
     chartered boat) are one fixed cost regardless of group size and are left
     untouched."""
     for day_data in itinerary.values():
+        if not isinstance(day_data, dict):
+            continue
         for meal in day_data.get('meals', []):
             if isinstance(meal, dict) and isinstance(meal.get('cost'), (int, float)):
                 meal['cost'] = meal['cost'] * num_travelers
@@ -447,23 +623,11 @@ def _scale_per_person_costs(itinerary: Dict[str, Any], num_travelers: int) -> No
             activity['cost'] = cost * num_travelers
 
 
-async def generate_single_plan(preferences: Dict, plan_type: str, trip_id: str, user_id: str) -> Dict:
-    """Generate a single vacation plan using AI with real price anchoring."""
-    import json
-
-    currency = preferences.get('currency', 'INR')
-    currency_symbol = '₹' if currency == 'INR' else '$'
-    num_travelers = preferences.get('num_travelers', 1)
-    room_count = _room_count(num_travelers)
-    # Age-weighted count for flight/train/meal pricing (room count above stays
-    # on raw headcount - occupancy isn't age-discounted).
-    fare_units = _fare_units(
-        preferences.get('adults', num_travelers),
-        preferences.get('children', 0),
-        preferences.get('seniors', 0),
-    )
-
-    # ── Step 1: Fetch real anchor prices ────────────────────────────────────
+async def _fetch_anchor_pricing(preferences: Dict, plan_type: str, user_id: str, fare_units: float, room_count: int) -> Dict[str, Any]:
+    """Fetch real flight/train + hotel anchor prices for one tier. Split out
+    of generate_single_plan so a single-tier regenerate can reuse a
+    previously-fetched anchor (see the "anchor" param there) instead of
+    hitting Duffel/SerpApi again for tiers that already anchored fine."""
     transport_mode = preferences.get("transportation", "flight").lower()
     is_train = "train" in transport_mode
 
@@ -514,6 +678,7 @@ async def generate_single_plan(preferences: Dict, plan_type: str, trip_id: str, 
                 travelers=1,
                 preference=flight_pref,
             )
+            await usage_service.log_usage(db, "duffel", user_id=user_id, meta={"context": "generate_single_plan"})
             if af:
                 # Each traveler needs their own seat/fare, discounted by age
                 # (Ignav has no separate child/senior fare - see _fare_units).
@@ -543,6 +708,7 @@ async def generate_single_plan(preferences: Dict, plan_type: str, trip_id: str, 
             travelers=ROOM_OCCUPANCY,
             currency="INR",
         )
+        await usage_service.log_usage(db, "serpapi", user_id=user_id, meta={"context": "generate_single_plan"})
         if hotel_results:
             # hotel_results is already price-sorted ascending by the service -
             # SELECT the tier's hotel from real data, never edit its fields.
@@ -559,6 +725,73 @@ async def generate_single_plan(preferences: Dict, plan_type: str, trip_id: str, 
             )
     except Exception as e:
         logger.warning(f"Anchor hotel fetch failed for {plan_type}: {e}")
+
+    return {
+        "is_train": is_train,
+        "flight_price": flight_price,
+        "flight_airline": flight_airline,
+        "flight_number": flight_number,
+        "flight_dep_time": flight_dep_time,
+        "flight_arr_time": flight_arr_time,
+        "flight_duration": flight_duration,
+        "flight_stops": flight_stops,
+        "train_price": train_price,
+        "train_name": train_name,
+        "train_number": train_number,
+        "train_class": train_class,
+        "train_duration": train_duration,
+        "hotel_name": hotel_name,
+        "hotel_price_per_night": hotel_price_per_night,
+        "hotel_stars": hotel_stars,
+        "hotel_limited_inventory": hotel_limited_inventory,
+    }
+
+
+async def generate_single_plan(
+    preferences: Dict, plan_type: str, trip_id: str, user_id: str, anchor: Optional[Dict[str, Any]] = None
+) -> Dict:
+    """Generate a single vacation plan using AI with real price anchoring.
+
+    `anchor`, when provided, skips Step 1's Duffel/SerpApi calls entirely and
+    reuses that already-fetched flight/train + hotel pricing - used by the
+    per-tier regenerate endpoint so retrying just the AI portion for one tier
+    doesn't re-hit paid providers for pricing that hasn't changed.
+    """
+    import json
+
+    currency = preferences.get('currency', 'INR')
+    currency_symbol = '₹' if currency == 'INR' else '$'
+    num_travelers = preferences.get('num_travelers', 1)
+    room_count = _room_count(num_travelers)
+    # Age-weighted count for flight/train/meal pricing (room count above stays
+    # on raw headcount - occupancy isn't age-discounted).
+    fare_units = _fare_units(
+        preferences.get('adults', num_travelers),
+        preferences.get('children', 0),
+        preferences.get('seniors', 0),
+    )
+
+    # ── Step 1: Fetch real anchor prices (or reuse a previously-fetched one)
+    if anchor is None:
+        anchor = await _fetch_anchor_pricing(preferences, plan_type, user_id, fare_units, room_count)
+
+    is_train = anchor["is_train"]
+    flight_price = anchor["flight_price"]
+    flight_airline = anchor["flight_airline"]
+    flight_number = anchor["flight_number"]
+    flight_dep_time = anchor["flight_dep_time"]
+    flight_arr_time = anchor["flight_arr_time"]
+    flight_duration = anchor["flight_duration"]
+    flight_stops = anchor["flight_stops"]
+    train_price = anchor["train_price"]
+    train_name = anchor["train_name"]
+    train_number = anchor["train_number"]
+    train_class = anchor["train_class"]
+    train_duration = anchor["train_duration"]
+    hotel_name = anchor["hotel_name"]
+    hotel_price_per_night = anchor["hotel_price_per_night"]
+    hotel_stars = anchor["hotel_stars"]
+    hotel_limited_inventory = anchor["hotel_limited_inventory"]
 
     # ── Step 2: Build tier-specific instructions ─────────────────────────────
     tier_rules = {
@@ -680,12 +913,15 @@ MEAL AND ACTIVITY PRICING (group size = {num_travelers}):
   - If unsure whether something is per-person or a flat group rate, use "per_person" - it's the more
     common case for tickets and experiences."""
 
-    # ── Step 4: Call LLM (with one retry on failure) ─────────────────────────
+    # ── Step 4: Call LLM (retry with backoff on failure) ──────────────────────
+    max_attempts = 3
     last_error = None
-    for attempt in range(2):
+    for attempt in range(max_attempts):
       try:
         if attempt > 0:
-            logger.warning(f"Retrying {plan_type} plan generation (attempt {attempt + 1})...")
+            backoff_seconds = 2 ** (attempt - 1)  # 1s, 2s, ...
+            logger.warning(f"Retrying {plan_type} plan generation (attempt {attempt + 1}/{max_attempts}) after {backoff_seconds}s...")
+            await asyncio.sleep(backoff_seconds)
         system_message = (
             f"You are a travel cost calculator that outputs ONLY valid JSON. "
             f"You ALWAYS use the exact prices provided in the MANDATORY CONSTRAINTS section. "
@@ -701,6 +937,7 @@ MEAL AND ACTIVITY PRICING (group size = {num_travelers}):
                 system_instruction=system_message,
             ),
         )
+        await usage_service.log_usage(db, "gemini", user_id=user_id, meta={"context": "generate_single_plan", "plan_type": plan_type})
 
         full_response = ""
         async for chunk in stream:
@@ -721,17 +958,33 @@ MEAL AND ACTIVITY PRICING (group size = {num_travelers}):
         anchor_transport_price = train_price if is_train else flight_price
         anchor_transport_label = "train" if is_train else "flight"
 
-        if anchor_transport_price > 0:
-            if 'cost_breakdown' in plan_data:
-                plan_data['cost_breakdown']['transportation'] = anchor_transport_price
+        # The AI is asked to return "itinerary" as an object keyed by day_1,
+        # day_2, ... with each day and its nested transportation/accommodation
+        # as objects - but it doesn't always comply (e.g. an empty list `[]`
+        # instead of `{}` for a day with no separate transport). Every write
+        # below assumes those shapes, so normalize them here rather than let
+        # a bracket-assignment into a wrongly-typed value crash the whole
+        # generation (see "list indices must be integers or slices" crash).
+        if not isinstance(plan_data.get('itinerary'), dict):
+            plan_data['itinerary'] = {}
+        itinerary = plan_data['itinerary']
+        for day_key, day_val in list(itinerary.items()):
+            if not isinstance(day_val, dict):
+                itinerary[day_key] = {}
 
-            itinerary = plan_data.get('itinerary', {})
+        if anchor_transport_price > 0:
+            if not isinstance(plan_data.get('cost_breakdown'), dict):
+                plan_data['cost_breakdown'] = {}
+            plan_data['cost_breakdown']['transportation'] = anchor_transport_price
+
             days = sorted(itinerary.keys())
 
             if days:
                 # Day 1: outbound transport
                 d1 = itinerary[days[0]]
                 if 'transportation' in d1:
+                    if not isinstance(d1['transportation'], dict):
+                        d1['transportation'] = {}
                     d1['transportation']['cost'] = anchor_transport_price
                     d1['transportation']['mode'] = anchor_transport_label
                     if is_train:
@@ -739,6 +992,8 @@ MEAL AND ACTIVITY PRICING (group size = {num_travelers}):
                     else:
                         d1['transportation']['details'] = f"{flight_airline} {flight_number} - {d1['transportation'].get('details', '')}"
                 for act in d1.get('activities', []):
+                    if not isinstance(act, dict):
+                        continue
                     kw = anchor_transport_label
                     if kw in act.get('activity', '').lower() or 'depart' in act.get('activity', '').lower():
                         act['cost'] = anchor_transport_price
@@ -746,7 +1001,7 @@ MEAL AND ACTIVITY PRICING (group size = {num_travelers}):
                 # Last day: always force return transport to match outbound
                 if len(days) > 1:
                     dl = itinerary[days[-1]]
-                    if 'transportation' not in dl:
+                    if not isinstance(dl.get('transportation'), dict):
                         dl['transportation'] = {}
                     dl['transportation']['cost'] = anchor_transport_price
                     dl['transportation']['mode'] = anchor_transport_label
@@ -756,9 +1011,8 @@ MEAL AND ACTIVITY PRICING (group size = {num_travelers}):
                         dl['transportation']['details'] = f"Return {flight_airline} {flight_number} - {preferences['destination']} to {preferences.get('starting_location','')}"
 
         if hotel_price_per_night > 0:
-            itinerary = plan_data.get('itinerary', {})
             for day_key, day_data in itinerary.items():
-                if 'accommodation' in day_data and isinstance(day_data['accommodation'], dict):
+                if isinstance(day_data, dict) and 'accommodation' in day_data and isinstance(day_data['accommodation'], dict):
                     day_data['accommodation']['cost'] = hotel_price_per_night
                     day_data['accommodation']['name'] = hotel_name or day_data['accommodation'].get('name', 'Hotel')
 
@@ -782,6 +1036,9 @@ MEAL AND ACTIVITY PRICING (group size = {num_travelers}):
 
         for day_key in day_keys_sorted:
             day_data = itinerary[day_key]
+            if not isinstance(day_data, dict):
+                day_data = {}
+                itinerary[day_key] = day_data
 
             t = day_data.get('transportation', {})
             day_transport = t.get('cost', 0) if isinstance(t, dict) else 0
@@ -789,8 +1046,8 @@ MEAL AND ACTIVITY PRICING (group size = {num_travelers}):
             a = day_data.get('accommodation', {})
             day_accommodation = a.get('cost', 0) if isinstance(a, dict) else 0
 
-            day_food = sum(meal.get('cost', 0) for meal in day_data.get('meals', []))
-            day_activities = sum(act.get('cost', 0) for act in day_data.get('activities', []))
+            day_food = sum(meal.get('cost', 0) for meal in day_data.get('meals', []) if isinstance(meal, dict))
+            day_activities = sum(act.get('cost', 0) for act in day_data.get('activities', []) if isinstance(act, dict))
 
             day_fixed = day_transport + day_accommodation
             day_variable = day_food + day_activities
@@ -818,6 +1075,11 @@ MEAL AND ACTIVITY PRICING (group size = {num_travelers}):
         logger.info(f"{plan_type}: day_1 transport cost AFTER fix = {plan_data.get('itinerary', {}).get('day_1', {}).get('transportation', {}).get('cost', 'N/A')}")
         logger.info(f"{plan_type}: recalculated total = {plan_data['total_cost']}")
 
+        # Force plan_type rather than trust the AI echoed it correctly - the
+        # regenerate-single-tier endpoint identifies/replaces a plan in the
+        # saved trip by this field, so it must always match what was asked for.
+        plan_data['plan_type'] = plan_type
+        plan_data['anchor_pricing'] = anchor
         plan_data.setdefault('currency', currency)
         plan_data.setdefault('currency_symbol', currency_symbol)
         if hotel_limited_inventory:
@@ -831,9 +1093,13 @@ MEAL AND ACTIVITY PRICING (group size = {num_travelers}):
 
       except Exception as e:
             last_error = e
-            logger.warning(f"Attempt {attempt + 1} failed for {plan_type} plan: {e}")
+            logger.warning(f"Attempt {attempt + 1}/{max_attempts} failed for {plan_type} plan: {e}")
 
-    logger.error(f"All attempts failed for {plan_type} plan: {last_error}")
+    # All attempts genuinely failed - surface this as a distinct failure state
+    # rather than a "successful" zero-cost plan. The zero-cost shape used to be
+    # indistinguishable from a real (if oddly priced) plan, so it got persisted
+    # and shown to the user as if generation had succeeded.
+    logger.error(f"All {max_attempts} attempts failed for {plan_type} plan: {last_error}")
     return {
         "plan_type": plan_type,
         "currency": currency,
@@ -843,7 +1109,12 @@ MEAL AND ACTIVITY PRICING (group size = {num_travelers}):
         "total_cost": 0,
         "highlights": [],
         "budget_tips": [],
-        "error": str(last_error)
+        "generation_failed": True,
+        "error": f"{plan_type} plan generation failed, please try again.",
+        # The anchor fetch (Step 1) runs before the retry loop and never
+        # raises out of this function, so it's always available here too -
+        # a later regenerate call can reuse it even after a failed attempt.
+        "anchor_pricing": anchor,
     }
 
 
@@ -857,6 +1128,19 @@ async def get_user_trips(request: Request):
     ).sort("created_at", -1).to_list(100)
     
     return {"trips": trips}
+
+
+@api_router.get("/trips/quota-status")
+async def get_trip_quota_status(request: Request):
+    """Lets the trip planner show remaining free generations before the
+    user hits the wall, rather than only surfacing it as an error."""
+    user = await get_current_user(request)
+    is_premium = await is_user_premium(user.user_id)
+    if is_premium:
+        return {"is_premium": True, "used": 0, "limit": None, "remaining": None}
+    status = await quota_service.get_quota_status(db, user.user_id)
+    return {"is_premium": False, **status}
+
 
 @api_router.get("/trips/{trip_id}")
 async def get_trip(trip_id: str, request: Request):
@@ -887,6 +1171,8 @@ async def delete_trip(trip_id: str, request: Request):
 
 # AI Assistant Chat
 @api_router.post("/chat/stream")
+@limiter.limit("15/minute")  # per-IP - a live back-and-forth chat is bursty by nature
+@limiter.limit("15/minute", key_func=_session_token_key)  # per-authenticated-user
 async def chat_stream(chat_msg: ChatMessage, request: Request):
     user = await get_current_user(request)
     
@@ -909,6 +1195,7 @@ async def chat_stream(chat_msg: ChatMessage, request: Request):
                     system_instruction=system_message,
                 ),
             )
+            await usage_service.log_usage(db, "gemini", user_id=user.user_id, meta={"context": "chat_stream"})
 
             async for chunk in stream:
                 if chunk.text:
@@ -980,11 +1267,12 @@ class BookingRequest(BaseModel):
 
 @api_router.post("/search/flights")
 async def search_flights_endpoint(req: FlightSearchRequest, request: Request):
-    await get_current_user(request)
+    user = await get_current_user(request)
     # Try Duffel (real data) first, fall back to mock
     flights = await duffel_service.search_flights(
         req.origin, req.destination, req.departure_date, req.return_date, req.travelers
     )
+    await usage_service.log_usage(db, "duffel", user_id=user.user_id, meta={"context": "search_flights_endpoint"})
     provider = "ignav"
     if not flights:
         logger.warning("Duffel returned no flights, falling back to mock data")
@@ -1028,11 +1316,12 @@ async def search_trains_endpoint(req: TrainSearchRequest, request: Request):
 
 @api_router.post("/search/hotels")
 async def search_hotels_endpoint(req: HotelSearchRequest, request: Request):
-    await get_current_user(request)
+    user = await get_current_user(request)
     # Try SerpApi (real data) first, fall back to mock
     hotels = await serpapi_hotels_service.search_hotels(
         req.destination, req.check_in, req.check_out, req.travelers, currency="INR"
     )
+    await usage_service.log_usage(db, "serpapi", user_id=user.user_id, meta={"context": "search_hotels_endpoint"})
     provider = "serpapi"
     if not hotels:
         logger.warning("SerpApi returned no hotels, falling back to mock data")
@@ -1065,7 +1354,8 @@ async def get_destination_coords_endpoint(destination: str, request: Request):
 
 
 @api_router.get("/locations/autocomplete")
-async def locations_autocomplete(q: str = Query("", min_length=0)):
+@limiter.limit("25/minute")  # per-IP - generous enough for live typeahead, still bounded
+async def locations_autocomplete(request: Request, q: str = Query("", min_length=0)):
     """Autocomplete location suggestions. Returns popular destinations matching query.
     Public endpoint - used on landing page as well."""
     suggestions = locations_service.search_locations(q, limit=8)
@@ -1567,6 +1857,19 @@ async def stripe_webhook(request: Request):
         raise HTTPException(status_code=400, detail=f"Webhook processing failed: {str(e)}")
 
 
+# ==================== Admin: Usage Summary ====================
+# Backup signal for eyeballing provider call volume without waiting on a
+# provider dashboard alert - NOT a replacement for actually configuring
+# spend/quota alarms in the Gemini and SerpApi consoles (that's dashboard-side
+# and still needs to be done manually).
+
+@api_router.get("/admin/usage-summary")
+async def get_admin_usage_summary(x_admin_key: Optional[str] = Header(default=None)):
+    if not ADMIN_API_KEY or x_admin_key != ADMIN_API_KEY:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    return await usage_service.get_usage_summary(db)
+
+
 # ==================== Premium Subscription Status ====================
 
 @api_router.get("/subscription/status")
@@ -1612,6 +1915,10 @@ async def startup_event():
         await price_cache_service.ensure_indexes(db)
     except Exception as e:
         logger.warning(f"price_cache index setup failed at startup: {e}")
+    try:
+        await quota_service.ensure_indexes(db)
+    except Exception as e:
+        logger.warning(f"quota index setup failed at startup: {e}")
 
 
 app.include_router(api_router)

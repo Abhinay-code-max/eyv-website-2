@@ -156,6 +156,8 @@ const TripResultsPage = () => {
   const [selectedPlan, setSelectedPlan] = useState(null);
   const [mapCenter, setMapCenter] = useState(null);
   const [mapMarkers, setMapMarkers] = useState([]);
+  const [regenerating, setRegenerating] = useState(false);
+  const [regenerateError, setRegenerateError] = useState(null);
 
   useEffect(() => { fetchTrip(); }, [tripId]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -189,6 +191,34 @@ const TripResultsPage = () => {
       console.error('Error fetching trip:', error);
     } finally {
       setLoading(false);
+    }
+  };
+
+  // One click = one server-side attempt (which itself retries a few times
+  // with backoff before giving up - see generate_single_plan). No client-side
+  // retry loop here on purpose - the user drives each further attempt.
+  const handleRegenerate = async (planType) => {
+    setRegenerating(true);
+    setRegenerateError(null);
+    try {
+      const response = await axios.post(
+        `${API_URL}/trips/${tripId}/regenerate/${planType}`,
+        {},
+        { withCredentials: true }
+      );
+      const freshPlan = response.data.plan;
+      setTrip((prev) => ({
+        ...prev,
+        plans: prev.plans.map((p) => (p.plan_type === planType ? freshPlan : p)),
+      }));
+      setSelectedPlan(freshPlan);
+    } catch (error) {
+      console.error('Error regenerating plan:', error);
+      setRegenerateError(
+        error.response?.data?.detail || `${planType} plan regeneration failed, please try again.`
+      );
+    } finally {
+      setRegenerating(false);
     }
   };
 
@@ -269,7 +299,7 @@ const TripResultsPage = () => {
                 <motion.div
                   key={idx}
                   data-testid={`${plan.plan_type.toLowerCase()}-plan-card`}
-                  onClick={() => setSelectedPlan(plan)}
+                  onClick={() => { setSelectedPlan(plan); setRegenerateError(null); }}
                   className={`relative p-6 rounded-2xl border-2 cursor-pointer transition-all hover:shadow-xl ${
                     active ? `${style.ring} ${style.bg}` : 'border-[#E7E5E4] hover:border-[#C47245]/30'
                   }`}
@@ -293,14 +323,20 @@ const TripResultsPage = () => {
                       {plan.plan_type === 'Budget' ? '💚' : plan.plan_type === 'Premium' ? '✨' : '👑'}
                     </span>
                   </div>
-                  <div className="flex items-baseline gap-1 mb-4">
-                    <span className="text-2xl font-semibold" style={{ color: style.accent }}>
-                      {plan.currency_symbol || (plan.currency === 'INR' ? '₹' : '$')}
-                    </span>
-                    <span className="text-4xl font-semibold text-[#1C1917]">
-                      {plan.total_cost?.toLocaleString() || 'N/A'}
-                    </span>
-                  </div>
+                  {plan.generation_failed ? (
+                    <div className="mb-4 text-sm font-medium text-red-600">
+                      Generation failed — tap to see details
+                    </div>
+                  ) : (
+                    <div className="flex items-baseline gap-1 mb-4">
+                      <span className="text-2xl font-semibold" style={{ color: style.accent }}>
+                        {plan.currency_symbol || (plan.currency === 'INR' ? '₹' : '$')}
+                      </span>
+                      <span className="text-4xl font-semibold text-[#1C1917]">
+                        {plan.total_cost?.toLocaleString() || 'N/A'}
+                      </span>
+                    </div>
+                  )}
                   <div className="space-y-2 text-sm text-[#57534E]">
                     {plan.highlights?.slice(0, 3).map((h, i) => (
                       <div key={i} className="flex items-start gap-2">
@@ -326,6 +362,31 @@ const TripResultsPage = () => {
               transition={{ duration: 0.4 }}
               className="space-y-8"
             >
+              {selectedPlan.generation_failed ? (
+                <div data-testid="plan-generation-error" className="bg-white rounded-2xl p-8 border border-red-200 shadow-sm text-center">
+                  <h3 className="text-2xl font-medium text-red-600 mb-3"
+                    style={{ fontFamily: 'Cormorant Garamond, serif' }}>
+                    {selectedPlan.plan_type} plan generation failed
+                  </h3>
+                  <p className="text-[#57534E] mb-6">
+                    {selectedPlan.error || 'Please try again.'}
+                  </p>
+                  <Button
+                    data-testid="regenerate-plan-button"
+                    onClick={() => handleRegenerate(selectedPlan.plan_type)}
+                    disabled={regenerating}
+                    className="text-white px-8 py-5 rounded-xl gap-2"
+                    style={{ background: `linear-gradient(135deg, ${ps.accent}, ${ps.accent}CC)` }}
+                  >
+                    <Sparkles size={18} />
+                    {regenerating ? 'Regenerating…' : 'Regenerate this plan'}
+                  </Button>
+                  {regenerateError && (
+                    <p className="text-sm text-red-600 mt-4">{regenerateError}</p>
+                  )}
+                </div>
+              ) : (
+                <>
               {/* Map */}
               {mapCenter && (
                 <div className="bg-white rounded-2xl p-8 border border-[#E7E5E4] shadow-sm">
@@ -402,6 +463,8 @@ const TripResultsPage = () => {
                   <p className="text-[#57534E]">Itinerary is being generated. Please check back soon.</p>
                 )}
               </div>
+                </>
+              )}
 
               {/* Save CTA */}
               <div className="flex justify-center pb-8">
