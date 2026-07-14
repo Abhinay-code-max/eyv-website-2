@@ -623,6 +623,107 @@ def _scale_per_person_costs(itinerary: Dict[str, Any], num_travelers: int) -> No
             activity['cost'] = cost * num_travelers
 
 
+# Enforces the plan JSON's shape at generation time (Gemini structured
+# output - response_mime_type="application/json" + response_json_schema)
+# instead of only validating/fixing it after the fact. This is a reduction
+# in how often the post-generation shape-hardening below has to kick in,
+# not a replacement for it - structured output has occasionally been
+# observed to still deviate (e.g. under retries/edge-case prompts), so the
+# defensive isinstance checks in generate_single_plan stay as the backstop.
+#
+# "itinerary" keeps its existing day_1/day_2/... dict shape (verified live
+# against the Gemini API that additionalProperties correctly constrains
+# each day's value rather than the model falling back to an array) so no
+# downstream code, prompt example, or stored-data shape has to change.
+_DAY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "date": {"type": "string"},
+        "transportation": {
+            "type": "object",
+            "properties": {
+                "mode": {"type": "string"},
+                "details": {"type": "string"},
+                "cost": {"type": "number"},
+            },
+            "required": ["mode", "cost"],
+        },
+        "activities": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "time": {"type": "string"},
+                    "activity": {"type": "string"},
+                    "location": {"type": "string"},
+                    "cost": {"type": "number"},
+                    "category": {"type": "string"},
+                    "pricing_type": {"type": "string", "enum": ["per_person", "flat_group"]},
+                },
+                "required": ["activity", "cost"],
+            },
+        },
+        "accommodation": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "type": {"type": "string"},
+                "cost": {"type": "number"},
+                "location": {"type": "string"},
+            },
+            "required": ["name", "cost"],
+        },
+        "meals": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "time": {"type": "string"},
+                    "restaurant": {"type": "string"},
+                    "cuisine": {"type": "string"},
+                    "cost": {"type": "number"},
+                },
+                "required": ["cost"],
+            },
+        },
+        "daily_total": {"type": "number"},
+        "cumulative_total": {"type": "number"},
+        "fixed_costs": {"type": "number"},
+        "variable_costs": {"type": "number"},
+    },
+    "required": ["date", "transportation", "accommodation", "meals", "activities"],
+}
+
+PLAN_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "plan_type": {"type": "string"},
+        "currency": {"type": "string"},
+        "currency_symbol": {"type": "string"},
+        "itinerary": {
+            "type": "object",
+            "additionalProperties": _DAY_SCHEMA,
+            "minProperties": 1,
+        },
+        "cost_breakdown": {
+            "type": "object",
+            "properties": {
+                "transportation": {"type": "number"},
+                "accommodation": {"type": "number"},
+                "food": {"type": "number"},
+                "activities": {"type": "number"},
+                "miscellaneous": {"type": "number"},
+            },
+            "required": ["transportation", "accommodation", "food", "activities", "miscellaneous"],
+        },
+        "total_cost": {"type": "number"},
+        "highlights": {"type": "array", "items": {"type": "string"}},
+        "budget_tips": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["plan_type", "currency", "currency_symbol", "itinerary", "cost_breakdown", "total_cost", "highlights", "budget_tips"],
+}
+
+
 async def _fetch_anchor_pricing(preferences: Dict, plan_type: str, user_id: str, fare_units: float, room_count: int) -> Dict[str, Any]:
     """Fetch real flight/train + hotel anchor prices for one tier. Split out
     of generate_single_plan so a single-tier regenerate can reuse a
@@ -935,6 +1036,8 @@ MEAL AND ACTIVITY PRICING (group size = {num_travelers}):
             contents=prompt,
             config=genai_types.GenerateContentConfig(
                 system_instruction=system_message,
+                response_mime_type="application/json",
+                response_json_schema=PLAN_RESPONSE_SCHEMA,
             ),
         )
         await usage_service.log_usage(db, "gemini", user_id=user_id, meta={"context": "generate_single_plan", "plan_type": plan_type})
