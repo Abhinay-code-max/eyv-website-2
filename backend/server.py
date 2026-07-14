@@ -443,6 +443,61 @@ async def logout(request: Request, response: Response):
     response.delete_cookie(key="session_token", path="/")
     return {"message": "Logged out successfully"}
 
+TRIP_PLAN_TYPES = ("Budget", "Premium", "Luxury")
+
+
+def _placeholder_plan(plan_type: str, currency: str, currency_symbol: str) -> Dict[str, Any]:
+    """Shape a tier's entry takes in the trips.plans array from the moment
+    the trip is created until that tier's own generation finishes - lets the
+    frontend render each tier's card independently (status: "generating" ->
+    "ready"/"failed") instead of blocking on the slowest of the three."""
+    return {
+        "plan_type": plan_type,
+        "status": "generating",
+        "currency": currency,
+        "currency_symbol": currency_symbol,
+        "itinerary": {},
+        "cost_breakdown": {"transportation": 0, "accommodation": 0, "food": 0, "activities": 0, "miscellaneous": 0},
+        "total_cost": 0,
+        "highlights": [],
+        "budget_tips": [],
+    }
+
+
+# Strong references to in-flight background generation tasks - asyncio only
+# holds a *weak* reference to a task once nothing else does, so a bare
+# `asyncio.create_task(...)` with the result discarded risks the task being
+# garbage-collected mid-generation. Each task removes itself on completion.
+_background_generation_tasks: set = set()
+
+
+def _spawn_background_task(coro) -> None:
+    task = asyncio.create_task(coro)
+    _background_generation_tasks.add(task)
+
+    def _on_done(t: asyncio.Task) -> None:
+        _background_generation_tasks.discard(t)
+        if not t.cancelled() and t.exception() is not None:
+            # generate_single_plan already catches and reports its own
+            # failures via the "failed" plan status - this is a backstop
+            # for anything unexpected escaping the update itself (e.g. a
+            # DB write error), so it isn't silently dropped.
+            logger.error(f"Background trip-generation task failed unexpectedly: {t.exception()}")
+
+    task.add_done_callback(_on_done)
+
+
+async def _generate_and_save_tier(trip_id: str, user_id: str, plan_type: str, preferences_dict: Dict, plan_index: int) -> None:
+    """Generate one tier and write only its slot in the trip's plans array -
+    the same single-index update the regenerate endpoint uses, so a tier
+    finishing here is indistinguishable from one finishing via regenerate."""
+    plan = await generate_single_plan(preferences_dict, plan_type, trip_id, user_id)
+    await db.trips.update_one(
+        {"trip_id": trip_id, "user_id": user_id},
+        {"$set": {f"plans.{plan_index}": plan, "updated_at": datetime.now(timezone.utc).isoformat()}},
+    )
+
+
 # Trip Planning Routes
 @api_router.post("/trips/generate")
 @limiter.limit("5/minute")  # per-IP - stops a scripted loop from one source
@@ -461,31 +516,33 @@ async def generate_trip_plans(preferences: TripPreferences, request: Request):
 
     # Store preferences
     preferences_dict = preferences.model_dump()
+    currency = preferences_dict.get('currency', 'INR')
+    currency_symbol = '₹' if currency == 'INR' else '$'
 
-    # Generate 3 plans in parallel using AI
-    plan_tasks = [
-        generate_single_plan(preferences_dict, plan_type, trip_id, user.user_id)
-        for plan_type in ["Budget", "Premium", "Luxury"]
-    ]
-    plans = await asyncio.gather(*plan_tasks)
-    
-    # Save trip
+    # Save the trip immediately with all three tiers in "generating" status,
+    # then kick off each tier's generation as an independent background task
+    # instead of blocking this request on asyncio.gather for all three.
+    # Budget/Premium typically finish well before Luxury (larger, denser
+    # itinerary -> more prone to needing a retry) - this lets the frontend
+    # show each tier the moment *it* is done rather than gating all three on
+    # the slowest, and lets the client navigate to the results page and
+    # start rendering almost immediately instead of waiting minutes.
+    placeholder_plans = [_placeholder_plan(plan_type, currency, currency_symbol) for plan_type in TRIP_PLAN_TYPES]
     saved_trip = {
         "trip_id": trip_id,
         "user_id": user.user_id,
         "trip_name": f"{preferences.destination} Trip",
         "preferences": preferences_dict,
-        "plans": plans,
+        "plans": placeholder_plans,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "updated_at": datetime.now(timezone.utc).isoformat()
     }
-    
     await db.trips.insert_one(saved_trip)
 
-    return {"trip_id": trip_id, "plans": plans}
+    for plan_index, plan_type in enumerate(TRIP_PLAN_TYPES):
+        _spawn_background_task(_generate_and_save_tier(trip_id, user.user_id, plan_type, preferences_dict, plan_index))
 
-
-REGENERATE_PLAN_TYPES = ("Budget", "Premium", "Luxury")
+    return {"trip_id": trip_id, "plans": placeholder_plans}
 
 
 @api_router.post("/trips/{trip_id}/regenerate/{plan_type}")
@@ -497,8 +554,8 @@ async def regenerate_trip_plan(trip_id: str, plan_type: str, request: Request):
     tiers or re-fetching flight/hotel anchor data that already succeeded."""
     user = await get_current_user(request)
 
-    if plan_type not in REGENERATE_PLAN_TYPES:
-        raise HTTPException(status_code=400, detail=f"plan_type must be one of {list(REGENERATE_PLAN_TYPES)}")
+    if plan_type not in TRIP_PLAN_TYPES:
+        raise HTTPException(status_code=400, detail=f"plan_type must be one of {list(TRIP_PLAN_TYPES)}")
 
     # Scoping the lookup to user_id doubles as the ownership check - a
     # trip_id that doesn't exist and one that belongs to someone else both
@@ -1182,6 +1239,7 @@ MEAL AND ACTIVITY PRICING (group size = {num_travelers}):
         # regenerate-single-tier endpoint identifies/replaces a plan in the
         # saved trip by this field, so it must always match what was asked for.
         plan_data['plan_type'] = plan_type
+        plan_data['status'] = 'ready'
         plan_data['anchor_pricing'] = anchor
         plan_data.setdefault('currency', currency)
         plan_data.setdefault('currency_symbol', currency_symbol)
@@ -1205,6 +1263,7 @@ MEAL AND ACTIVITY PRICING (group size = {num_travelers}):
     logger.error(f"All {max_attempts} attempts failed for {plan_type} plan: {last_error}")
     return {
         "plan_type": plan_type,
+        "status": "failed",
         "currency": currency,
         "currency_symbol": currency_symbol,
         "itinerary": {},

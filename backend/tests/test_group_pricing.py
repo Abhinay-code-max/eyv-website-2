@@ -20,6 +20,7 @@ for it the way price_cache_service provides for real bookings.
 """
 import os
 import sys
+import time
 import pytest
 import requests
 from pydantic import ValidationError
@@ -28,6 +29,23 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from server import _room_count, _scale_per_person_costs, _fare_units, TripPreferences  # noqa: E402
 
 BASE_URL = os.environ.get('REACT_APP_BACKEND_URL', 'http://localhost:8001').rstrip('/')
+
+
+def _wait_for_trip_completion(trip_id, headers, timeout=300, poll_interval=3):
+    """/trips/generate now returns as soon as the trip is created, with all
+    three tiers in status="generating" - each tier finishes independently in
+    the background (see _generate_and_save_tier in server.py). Tests that
+    need real cost data must poll GET /trips/{trip_id} until no tier is
+    still generating, the same way the frontend does."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        g = requests.get(f"{BASE_URL}/api/trips/{trip_id}", headers=headers, timeout=10)
+        assert g.status_code == 200, g.text
+        trip = g.json()
+        if all(p.get("status") != "generating" for p in trip["plans"]):
+            return trip
+        time.sleep(poll_interval)
+    raise TimeoutError(f"trip {trip_id} did not finish generating within {timeout}s")
 SESSION_TOKEN = os.environ.get('TEST_SESSION_TOKEN', 'test_session_eyv_1780670554293')
 HEADERS = {"Authorization": f"Bearer {SESSION_TOKEN}", "Content-Type": "application/json"}
 
@@ -158,10 +176,11 @@ def test_group_pricing_scales_correctly_live():
 
     def _generate(num_travelers):
         payload = {**base_payload, "num_travelers": num_travelers, "adults": num_travelers}
-        r = requests.post(f"{BASE_URL}/api/trips/generate", json=payload, headers=HEADERS, timeout=400)
+        r = requests.post(f"{BASE_URL}/api/trips/generate", json=payload, headers=HEADERS, timeout=30)
         assert r.status_code == 200, r.text
-        plans = r.json()["plans"]
-        plan = next(p for p in plans if p.get("plan_type") == "Premium")
+        trip = _wait_for_trip_completion(r.json()["trip_id"], HEADERS, timeout=400)
+        plan = next(p for p in trip["plans"] if p.get("plan_type") == "Premium")
+        assert plan.get("status") == "ready", plan.get("error")
         return plan["cost_breakdown"]
 
     solo = _generate(1)
@@ -304,10 +323,11 @@ def test_regression_mixed_age_group_priced_below_all_adults_live():
 
     def _generate(adults, children, seniors):
         payload = {**base_payload, "adults": adults, "children": children, "seniors": seniors}
-        r = requests.post(f"{BASE_URL}/api/trips/generate", json=payload, headers=HEADERS, timeout=400)
+        r = requests.post(f"{BASE_URL}/api/trips/generate", json=payload, headers=HEADERS, timeout=30)
         assert r.status_code == 200, r.text
-        plans = r.json()["plans"]
-        plan = next(p for p in plans if p.get("plan_type") == "Premium")
+        trip = _wait_for_trip_completion(r.json()["trip_id"], HEADERS, timeout=400)
+        plan = next(p for p in trip["plans"] if p.get("plan_type") == "Premium")
+        assert plan.get("status") == "ready", plan.get("error")
         return plan["cost_breakdown"]
 
     all_adults = _generate(5, 0, 0)

@@ -4,7 +4,7 @@ import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   ArrowLeft, DollarSign, Plane, Hotel, Utensils, Activity,
-  Calendar, MapPin, Check, ChevronDown, ChevronUp, Sparkles,
+  Calendar, MapPin, Check, ChevronDown, ChevronUp, Sparkles, Loader2,
 } from 'lucide-react';
 import { API_URL } from '../constants';
 import { TRIP_PLANNER } from '../constants/testIds';
@@ -20,6 +20,10 @@ const PLAN_STYLES = {
   Luxury:  { ring: 'border-[#7C5CBF]',  bg: 'bg-[#FAF6FF]',  accent: '#7C5CBF',  badge: 'bg-[#EDE9FE] text-[#4C1D95]' },
 };
 const planStyle = (type) => PLAN_STYLES[type] || PLAN_STYLES.Premium;
+
+// How often to re-poll GET /trips/:id while any tier is still status
+// "generating" - see the polling effect in TripResultsPage below.
+const POLL_INTERVAL_MS = 3000;
 
 /* ─── collapsible day card ───────────────────────────────────────── */
 const DayCard = ({ day, details, formatCost, accent }) => {
@@ -159,7 +163,57 @@ const TripResultsPage = () => {
   const [regenerating, setRegenerating] = useState(false);
   const [regenerateError, setRegenerateError] = useState(null);
 
-  useEffect(() => { fetchTrip(); }, [tripId]); // eslint-disable-line react-hooks/exhaustive-deps
+  // /trips/generate now returns as soon as the trip exists, with each tier
+  // in status "generating" until its own background generation finishes
+  // (see _generate_and_save_tier in server.py) - poll here the same way,
+  // re-fetching the trip every few seconds only while at least one tier is
+  // still generating, so Budget/Premium can render the moment they're done
+  // without waiting on the slowest tier (often Luxury).
+  useEffect(() => {
+    let cancelled = false;
+    let intervalId = null;
+
+    const applyTrip = (data) => {
+      if (cancelled) return;
+      setTrip(data);
+      setSelectedPlan((prev) => {
+        if (!prev) return data.plans[1]; // default to Premium on first load
+        return data.plans.find((p) => p.plan_type === prev.plan_type) || prev;
+      });
+    };
+
+    // Returns whether polling should continue (a tier is still generating).
+    const poll = async () => {
+      try {
+        const response = await axios.get(`${API_URL}/trips/${tripId}`, { withCredentials: true });
+        applyTrip(response.data);
+        return response.data.plans.some((p) => p.status === 'generating');
+      } catch (error) {
+        console.error('Error fetching trip:', error);
+        return false;
+      }
+    };
+
+    (async () => {
+      const stillGenerating = await poll();
+      if (cancelled) return;
+      setLoading(false);
+      if (stillGenerating) {
+        intervalId = setInterval(async () => {
+          const keepGoing = await poll();
+          if (!keepGoing && intervalId) {
+            clearInterval(intervalId);
+            intervalId = null;
+          }
+        }, POLL_INTERVAL_MS);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (intervalId) clearInterval(intervalId);
+    };
+  }, [tripId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (trip?.preferences?.destination) {
@@ -179,18 +233,6 @@ const TripResultsPage = () => {
       setMapMarkers([{ lat, lng, title: destination, description: 'Your destination' }]);
     } catch (error) {
       console.error('Coords fetch error:', error);
-    }
-  };
-
-  const fetchTrip = async () => {
-    try {
-      const response = await axios.get(`${API_URL}/trips/${tripId}`, { withCredentials: true });
-      setTrip(response.data);
-      setSelectedPlan(response.data.plans[1]); // Default to Premium
-    } catch (error) {
-      console.error('Error fetching trip:', error);
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -323,7 +365,12 @@ const TripResultsPage = () => {
                       {plan.plan_type === 'Budget' ? '💚' : plan.plan_type === 'Premium' ? '✨' : '👑'}
                     </span>
                   </div>
-                  {plan.generation_failed ? (
+                  {plan.status === 'generating' ? (
+                    <div className="mb-4 flex items-center gap-2 text-sm font-medium text-[#57534E]">
+                      <Loader2 size={16} className="animate-spin" style={{ color: style.accent }} />
+                      Generating…
+                    </div>
+                  ) : plan.generation_failed ? (
                     <div className="mb-4 text-sm font-medium text-red-600">
                       Generation failed — tap to see details
                     </div>
@@ -362,7 +409,18 @@ const TripResultsPage = () => {
               transition={{ duration: 0.4 }}
               className="space-y-8"
             >
-              {selectedPlan.generation_failed ? (
+              {selectedPlan.status === 'generating' ? (
+                <div data-testid="plan-generating" className="bg-white rounded-2xl p-8 border border-[#E7E5E4] shadow-sm text-center">
+                  <Loader2 size={28} className="animate-spin mx-auto mb-4" style={{ color: ps.accent }} />
+                  <h3 className="text-2xl font-medium text-[#2A4B5C] mb-2"
+                    style={{ fontFamily: 'Cormorant Garamond, serif' }}>
+                    Generating your {selectedPlan.plan_type} plan…
+                  </h3>
+                  <p className="text-[#57534E]">
+                    This can take a minute - the other tiers will keep showing as they finish too.
+                  </p>
+                </div>
+              ) : selectedPlan.generation_failed ? (
                 <div data-testid="plan-generation-error" className="bg-white rounded-2xl p-8 border border-red-200 shadow-sm text-center">
                   <h3 className="text-2xl font-medium text-red-600 mb-3"
                     style={{ fontFamily: 'Cormorant Garamond, serif' }}>
