@@ -1398,6 +1398,29 @@ async def chat_stream(chat_msg: ChatMessage, request: Request):
         }
     )
 
+@api_router.get("/chat/{trip_id}")
+async def get_chat_history(trip_id: str, request: Request):
+    """Chat history for a (user, trip) pair. trip_id == "none" means general
+    chat with no trip attached (stored as trip_id = null)."""
+    user = await get_current_user(request)
+    resolved_trip_id = None if trip_id == "none" else trip_id
+
+    if resolved_trip_id:
+        owned_trip = await db.trips.find_one(
+            {"trip_id": resolved_trip_id, "user_id": user.user_id},
+            {"_id": 1}
+        )
+        if not owned_trip:
+            raise HTTPException(status_code=403, detail="Forbidden")
+
+    messages = await chat_service.get_all_messages(db, user.user_id, resolved_trip_id)
+    return {
+        "messages": [
+            {"role": m["role"], "content": m["content"], "timestamp": m["timestamp"].isoformat()}
+            for m in messages
+        ]
+    }
+
 @api_router.get("/")
 async def root():
     return {"message": "EYV API - Enjoy Your Vacation"}
