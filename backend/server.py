@@ -1332,6 +1332,84 @@ async def delete_trip(trip_id: str, request: Request):
     
     return {"message": "Trip deleted successfully"}
 
+
+def _day_sort_key(day_key: str):
+    # "day_2" before "day_10" - a plain string sort would put day_10 first.
+    try:
+        return (0, int(day_key.rsplit("_", 1)[-1]))
+    except (ValueError, IndexError):
+        return (1, day_key)
+
+
+def build_trip_context(trip: dict) -> str:
+    """Compact plain-text summary of a trip doc for the chat system prompt.
+
+    trip.plans holds three parallel tiers (Budget/Premium/Luxury); the
+    itinerary summarized here is whichever tier matches the trip's chosen
+    preferences.budget_level, falling back to any tier that has one
+    generated. Only populated fields are included - nothing prints as
+    "None" - and the itinerary digest is capped at a handful of days so a
+    long trip can't balloon the prompt.
+
+    Example: build_trip_context({"preferences": {"destination": "Goa",
+    "departure_date": "2026-08-10", "return_date": "2026-08-14",
+    "adults": 2, "budget_level": "Budget"}, "plans": [{"plan_type": "Budget",
+    "itinerary": {"day_1": {"activities": [{"activity": "Arrival"}]}}}]})
+    -> "Trip: Goa | Dates: 2026-08-10 to 2026-08-14 | Travelers: 2 adults |
+    Budget: Budget | Itinerary so far (Budget, 1 day(s)): Day 1 - Arrival"
+    """
+    prefs = trip.get("preferences") or {}
+    parts = []
+
+    destination = prefs.get("destination")
+    if destination:
+        parts.append(f"Trip: {destination}")
+
+    departure_date = prefs.get("departure_date")
+    return_date = prefs.get("return_date")
+    if departure_date and return_date:
+        parts.append(f"Dates: {departure_date} to {return_date}")
+    elif departure_date:
+        parts.append(f"Dates: from {departure_date}")
+
+    traveler_bits = [
+        f"{prefs[key]} {label}"
+        for key, label in (("adults", "adults"), ("children", "children"), ("seniors", "seniors"))
+        if prefs.get(key)
+    ]
+    if traveler_bits:
+        parts.append(f"Travelers: {', '.join(traveler_bits)}")
+
+    budget_level = prefs.get("budget_level")
+    if budget_level:
+        parts.append(f"Budget: {budget_level}")
+
+    plans = trip.get("plans") or []
+    chosen = next((p for p in plans if p.get("plan_type") == budget_level and p.get("itinerary")), None)
+    if not chosen:
+        chosen = next((p for p in plans if p.get("itinerary")), None)
+
+    if chosen:
+        itinerary = chosen.get("itinerary") or {}
+        day_keys = sorted(itinerary.keys(), key=_day_sort_key)
+        MAX_DAYS_SHOWN = 6
+        day_summaries = []
+        for day_key in day_keys[:MAX_DAYS_SHOWN]:
+            day = itinerary.get(day_key) or {}
+            activities = day.get("activities") or []
+            themes = [a["activity"] for a in activities[:2] if a.get("activity")]
+            label = day_key.replace("_", " ").capitalize()
+            day_summaries.append(f"{label} - {' + '.join(themes)}" if themes else label)
+        itinerary_line = "; ".join(day_summaries)
+        if len(day_keys) > MAX_DAYS_SHOWN:
+            itinerary_line += f"; plus {len(day_keys) - MAX_DAYS_SHOWN} more day(s)"
+        parts.append(f"Itinerary so far ({chosen.get('plan_type')}, {len(day_keys)} day(s)): {itinerary_line}")
+    else:
+        parts.append("No itinerary planned yet")
+
+    return " | ".join(parts)
+
+
 # AI Assistant Chat
 @api_router.post("/chat/stream")
 @limiter.limit("15/minute")  # per-IP - a live back-and-forth chat is bursty by nature
