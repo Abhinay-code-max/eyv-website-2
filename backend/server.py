@@ -31,6 +31,7 @@ from services import serpapi_hotels_service
 from services import price_cache_service
 from services import log_redaction
 from services import quota_service, usage_service
+from services import chat_service
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -2081,6 +2082,10 @@ async def startup_event():
         await quota_service.ensure_indexes(db)
     except Exception as e:
         logger.warning(f"quota index setup failed at startup: {e}")
+    try:
+        await chat_service.ensure_indexes(db)
+    except Exception as e:
+        logger.warning(f"chat index setup failed at startup: {e}")
 
 
 app.include_router(api_router)
