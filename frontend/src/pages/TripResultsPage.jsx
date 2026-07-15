@@ -1,15 +1,17 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   ArrowLeft, DollarSign, Plane, Hotel, Utensils, Activity,
   Calendar, MapPin, Check, ChevronDown, ChevronUp, Sparkles, Loader2,
+  MessageCircle, Send, X,
 } from 'lucide-react';
 import { API_URL } from '../constants';
 import { TRIP_PLANNER } from '../constants/testIds';
 import TripLoadingScreen from '../components/TripLoadingScreen';
 import { Button } from '../components/ui/button';
+import { Input } from '../components/ui/input';
 import EYVLogo from '../components/EYVLogo';
 import TripMap from '../components/TripMap';
 
@@ -162,6 +164,12 @@ const TripResultsPage = () => {
   const [mapMarkers, setMapMarkers] = useState([]);
   const [regenerating, setRegenerating] = useState(false);
   const [regenerateError, setRegenerateError] = useState(null);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatMessage, setChatMessage] = useState('');
+  const [chatHistory, setChatHistory] = useState([]);
+  const [chatHistoryLoading, setChatHistoryLoading] = useState(true);
+  const [streamingMessage, setStreamingMessage] = useState('');
+  const chatEndRef = useRef(null);
 
   // /trips/generate now returns as soon as the trip exists, with each tier
   // in status "generating" until its own background generation finishes
@@ -221,6 +229,35 @@ const TripResultsPage = () => {
     }
   }, [trip]);
 
+  // Load this trip's persisted chat history whenever tripId changes, using
+  // the same `cancelled` guard as the trip-polling effect above so an
+  // in-flight fetch for a previously-viewed trip can't overwrite the panel
+  // after the user has already navigated to a different trip.
+  useEffect(() => {
+    let cancelled = false;
+    setChatHistoryLoading(true);
+    setChatHistory([]);
+
+    (async () => {
+      try {
+        const response = await axios.get(`${API_URL}/chat/${tripId}`, { withCredentials: true });
+        if (cancelled) return;
+        setChatHistory(response.data.messages);
+      } catch (error) {
+        console.error('Error fetching chat history:', error);
+        if (!cancelled) setChatHistory([]);
+      } finally {
+        if (!cancelled) setChatHistoryLoading(false);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [tripId]);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [chatHistory, streamingMessage]);
+
   /* ── API calls — preserved verbatim ── */
   const fetchDestinationCoords = async (destination) => {
     try {
@@ -261,6 +298,47 @@ const TripResultsPage = () => {
       );
     } finally {
       setRegenerating(false);
+    }
+  };
+
+  const handleSendMessage = async () => {
+    if (!chatMessage.trim()) return;
+    const userMessage = { role: 'user', content: chatMessage };
+    setChatHistory([...chatHistory, userMessage]);
+    setChatMessage('');
+    setStreamingMessage('');
+    try {
+      const response = await fetch(`${API_URL}/chat/stream`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ message: chatMessage }),
+      });
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let fullMessage = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value);
+        const lines = chunk.split('\n');
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6);
+            if (data === '[DONE]') {
+              setChatHistory(prev => [...prev, { role: 'assistant', content: fullMessage }]);
+              setStreamingMessage('');
+              break;
+            }
+            fullMessage += data;
+            setStreamingMessage(fullMessage);
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Chat error:', error);
+      setChatHistory(prev => [...prev, { role: 'assistant', content: 'Sorry, I encountered an error. Please try again.' }]);
+      setStreamingMessage('');
     }
   };
 
@@ -541,6 +619,115 @@ const TripResultsPage = () => {
           </AnimatePresence>
         )}
       </div>
+
+      {/* ── AI Chat FAB ── */}
+      <motion.button
+        onClick={() => setChatOpen(!chatOpen)}
+        className="fixed bottom-6 right-6 text-white p-4 rounded-full shadow-2xl transition-all z-40"
+        style={{ background: ps.accent, boxShadow: `0 8px 32px -8px ${ps.accent}80` }}
+        whileHover={{ scale: 1.1 }}
+        whileTap={{ scale: 0.95 }}
+      >
+        <AnimatePresence mode="wait">
+          <motion.span key={chatOpen ? 'close' : 'open'}
+            initial={{ rotate: -90, opacity: 0 }} animate={{ rotate: 0, opacity: 1 }}
+            exit={{ rotate: 90, opacity: 0 }} transition={{ duration: 0.2 }}>
+            {chatOpen ? <X size={26} /> : <MessageCircle size={26} />}
+          </motion.span>
+        </AnimatePresence>
+      </motion.button>
+
+      {/* ── AI Chat Panel ── */}
+      <AnimatePresence>
+        {chatOpen && (
+          <motion.div
+            initial={{ opacity: 0, y: 24, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 24, scale: 0.95 }}
+            transition={{ type: 'spring', stiffness: 320, damping: 28 }}
+            className="fixed bottom-24 right-6 w-[22rem] md:w-96 h-[520px] bg-white rounded-3xl shadow-2xl border border-[#E7E5E4] flex flex-col z-40 overflow-hidden"
+          >
+            <div className="relative px-5 py-4 text-white shrink-0"
+              style={{ background: `linear-gradient(135deg, ${ps.accent}, ${ps.accent}CC)` }}>
+              <div className="relative flex items-center gap-3">
+                <div className="w-9 h-9 rounded-full bg-white/20 flex items-center justify-center">
+                  <Sparkles size={18} />
+                </div>
+                <div>
+                  <h3 className="font-semibold text-base" style={{ fontFamily: 'Cormorant Garamond, serif' }}>
+                    AI Travel Assistant
+                  </h3>
+                  <p className="text-white/75 text-xs">Ask me anything about this trip!</p>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3 bg-[#F5F2EB]">
+              {chatHistoryLoading ? (
+                <div className="flex flex-col items-center justify-center h-full text-[#57534E]">
+                  <Loader2 size={24} className="animate-spin mb-2" style={{ color: ps.accent }} />
+                  <p className="text-xs">Loading conversation…</p>
+                </div>
+              ) : (
+                <>
+                  {chatHistory.length === 0 && (
+                    <div className="text-center py-10 text-[#57534E]">
+                      <div className="w-14 h-14 rounded-2xl flex items-center justify-center mx-auto mb-3"
+                        style={{ background: ps.accent + '18' }}>
+                        <Sparkles size={28} style={{ color: ps.accent }} />
+                      </div>
+                      <p className="font-medium text-[#1C1917] mb-1">Ask me anything about your trip</p>
+                      <p className="text-xs text-[#78716C]">Hotels, activities, budget — I have the full itinerary.</p>
+                    </div>
+                  )}
+                  {chatHistory.map((msg, idx) => (
+                    <motion.div key={idx}
+                      initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
+                      className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                      <div className={`max-w-[82%] px-4 py-3 rounded-2xl text-sm leading-relaxed ${
+                        msg.role === 'user'
+                          ? 'text-white rounded-br-sm'
+                          : 'bg-white text-[#1C1917] border border-[#E7E5E4] rounded-bl-sm shadow-sm'
+                      }`}
+                        style={msg.role === 'user' ? { background: ps.accent } : {}}>
+                        {msg.content}
+                      </div>
+                    </motion.div>
+                  ))}
+                  {streamingMessage && (
+                    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex justify-start">
+                      <div className="max-w-[82%] px-4 py-3 rounded-2xl rounded-bl-sm bg-white text-[#1C1917] border border-[#E7E5E4] shadow-sm text-sm leading-relaxed">
+                        {streamingMessage}
+                        <span className="inline-block w-1.5 h-4 ml-1 animate-pulse rounded-sm align-middle"
+                          style={{ background: ps.accent }} />
+                      </div>
+                    </motion.div>
+                  )}
+                </>
+              )}
+              <div ref={chatEndRef} />
+            </div>
+
+            <div className="px-4 py-3 bg-white border-t border-[#E7E5E4] shrink-0">
+              <div className="flex gap-2 items-center">
+                <Input
+                  value={chatMessage}
+                  onChange={(e) => setChatMessage(e.target.value)}
+                  onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
+                  placeholder="Ask me anything..."
+                  className="flex-1 rounded-xl text-sm text-[#1C1917]"
+                  style={{ borderColor: '#E7E5E4' }}
+                />
+                <Button onClick={handleSendMessage}
+                  className="rounded-xl px-3 shrink-0 transition-all hover:opacity-90 hover:shadow-md active:scale-95 text-white"
+                  style={{ background: ps.accent }}>
+                  <Send size={18} />
+                </Button>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 };
