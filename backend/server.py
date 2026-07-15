@@ -1338,9 +1338,20 @@ async def delete_trip(trip_id: str, request: Request):
 @limiter.limit("15/minute", key_func=_session_token_key)  # per-authenticated-user
 async def chat_stream(chat_msg: ChatMessage, request: Request):
     user = await get_current_user(request)
-    
+
+    # Chat-history trip-ownership guard: prevents one user from reading or
+    # polluting another user's chat_sessions by passing an arbitrary trip_id.
+    # Separate from the trip-context lookup below, which is unrelated.
+    if chat_msg.trip_id:
+        owned_trip = await db.trips.find_one(
+            {"trip_id": chat_msg.trip_id, "user_id": user.user_id},
+            {"_id": 1}
+        )
+        if not owned_trip:
+            raise HTTPException(status_code=403, detail="Forbidden")
+
     system_message = "You are a helpful AI travel assistant for EYV (Enjoy Your Vacation). Help users with travel planning, recommendations, itinerary changes, and travel-related questions. Be friendly, knowledgeable, and concise."
-    
+
     if chat_msg.trip_id:
         trip = await db.trips.find_one(
             {"trip_id": chat_msg.trip_id, "user_id": user.user_id},
@@ -1348,12 +1359,19 @@ async def chat_stream(chat_msg: ChatMessage, request: Request):
         )
         if trip:
             system_message += f"\n\nContext: The user is planning a trip to {trip['preferences']['destination']}. Here are their preferences: {trip['preferences']}"
-    
+
+    history = await chat_service.get_recent_messages(db, user.user_id, chat_msg.trip_id, limit=20)
+    gemini_contents = [
+        {"role": msg["role"], "parts": [{"text": msg["content"]}]} for msg in history
+    ]
+    gemini_contents.append({"role": "user", "parts": [{"text": chat_msg.message}]})
+
     async def event_generator():
+        full_response = ""
         try:
             stream = await gemini_client.aio.models.generate_content_stream(
                 model=GEMINI_MODEL,
-                contents=chat_msg.message,
+                contents=gemini_contents,
                 config=genai_types.GenerateContentConfig(
                     system_instruction=system_message,
                 ),
@@ -1362,7 +1380,9 @@ async def chat_stream(chat_msg: ChatMessage, request: Request):
 
             async for chunk in stream:
                 if chunk.text:
+                    full_response += chunk.text
                     yield f"data: {chunk.text}\n\n"
+            await chat_service.append_exchange(db, user.user_id, chat_msg.trip_id, chat_msg.message, full_response)
             yield "data: [DONE]\n\n"
         except Exception as e:
             logger.error(f"Chat stream error: {e}")
