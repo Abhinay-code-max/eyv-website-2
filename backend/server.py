@@ -1419,24 +1419,26 @@ async def chat_stream(chat_msg: ChatMessage, request: Request):
 
     # Chat-history trip-ownership guard: prevents one user from reading or
     # polluting another user's chat_sessions by passing an arbitrary trip_id.
-    # Separate from the trip-context lookup below, which is unrelated.
-    if chat_msg.trip_id:
-        owned_trip = await db.trips.find_one(
-            {"trip_id": chat_msg.trip_id, "user_id": user.user_id},
-            {"_id": 1}
-        )
-        if not owned_trip:
-            raise HTTPException(status_code=403, detail="Forbidden")
-
-    system_message = "You are a helpful AI travel assistant for EYV (Enjoy Your Vacation). Help users with travel planning, recommendations, itinerary changes, and travel-related questions. Be friendly, knowledgeable, and concise."
-
+    # Fetches the full doc (not just _id) so it can be reused below for trip
+    # context - avoids a second identical query.
+    trip = None
     if chat_msg.trip_id:
         trip = await db.trips.find_one(
             {"trip_id": chat_msg.trip_id, "user_id": user.user_id},
             {"_id": 0}
         )
-        if trip:
-            system_message += f"\n\nContext: The user is planning a trip to {trip['preferences']['destination']}. Here are their preferences: {trip['preferences']}"
+        if not trip:
+            raise HTTPException(status_code=403, detail="Forbidden")
+
+    system_message = "You are a helpful AI travel assistant for EYV (Enjoy Your Vacation). Help users with travel planning, recommendations, itinerary changes, and travel-related questions. Be friendly, knowledgeable, and concise."
+
+    if trip:
+        trip_context = build_trip_context(trip)
+        system_message += (
+            f"\n\nYou are a travel assistant helping with the following trip:\n{trip_context}"
+            f"\n\nUse this context to answer questions about the trip. If the user asks something "
+            f"unrelated to this trip, answer normally."
+        )
 
     history = await chat_service.get_recent_messages(db, user.user_id, chat_msg.trip_id, limit=20)
     gemini_contents = [
