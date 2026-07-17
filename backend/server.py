@@ -221,6 +221,7 @@ class SavedTrip(BaseModel):
 class ChatMessage(BaseModel):
     message: str
     trip_id: Optional[str] = None
+    selected_tier: Optional[str] = None
 
 # Auth Helper
 async def get_current_user(request: Request) -> User:
@@ -1341,20 +1342,25 @@ def _day_sort_key(day_key: str):
         return (1, day_key)
 
 
-def build_trip_context(trip: dict) -> str:
+def build_trip_context(trip: dict, tier: Optional[str] = None) -> str:
     """Compact plain-text summary of a trip doc for the chat system prompt.
 
-    trip.plans holds three parallel tiers (Budget/Premium/Luxury); the
-    itinerary summarized here is whichever tier matches the trip's chosen
-    preferences.budget_level, falling back to any tier that has one
-    generated. Only populated fields are included - nothing prints as
-    "None" - and the itinerary digest is capped at a handful of days so a
-    long trip can't balloon the prompt.
+    trip.plans holds three parallel tiers (Budget/Premium/Luxury). `tier`
+    identifies which one is currently on screen (e.g. the tab selected on
+    TripResultsPage) and drives both the itinerary summarized here and the
+    "Budget: X" label, so the two never contradict each other. If `tier`
+    is omitted or doesn't match any generated plan, falls back to the
+    trip's originally-requested preferences.budget_level, then to any tier
+    that has one generated. destination/dates/travelers are trip-level
+    (from preferences) and don't vary by tier. Only populated fields are
+    included - nothing prints as "None" - and the itinerary digest is
+    capped at a handful of days so a long trip can't balloon the prompt.
 
     Example: build_trip_context({"preferences": {"destination": "Goa",
     "departure_date": "2026-08-10", "return_date": "2026-08-14",
     "adults": 2, "budget_level": "Budget"}, "plans": [{"plan_type": "Budget",
-    "itinerary": {"day_1": {"activities": [{"activity": "Arrival"}]}}}]})
+    "itinerary": {"day_1": {"activities": [{"activity": "Arrival"}]}}}]},
+    tier="Budget")
     -> "Trip: Goa | Dates: 2026-08-10 to 2026-08-14 | Travelers: 2 adults |
     Budget: Budget | Itinerary so far (Budget, 1 day(s)): Day 1 - Arrival"
     """
@@ -1380,14 +1386,15 @@ def build_trip_context(trip: dict) -> str:
     if traveler_bits:
         parts.append(f"Travelers: {', '.join(traveler_bits)}")
 
-    budget_level = prefs.get("budget_level")
-    if budget_level:
-        parts.append(f"Budget: {budget_level}")
-
     plans = trip.get("plans") or []
-    chosen = next((p for p in plans if p.get("plan_type") == budget_level and p.get("itinerary")), None)
+    target_tier = tier or prefs.get("budget_level")
+    chosen = next((p for p in plans if p.get("plan_type") == target_tier and p.get("itinerary")), None)
     if not chosen:
         chosen = next((p for p in plans if p.get("itinerary")), None)
+
+    budget_level = chosen.get("plan_type") if chosen else prefs.get("budget_level")
+    if budget_level:
+        parts.append(f"Budget: {budget_level}")
 
     if chosen:
         itinerary = chosen.get("itinerary") or {}
@@ -1433,7 +1440,7 @@ async def chat_stream(chat_msg: ChatMessage, request: Request):
     system_message = "You are a helpful AI travel assistant for EYV (Enjoy Your Vacation). Help users with travel planning, recommendations, itinerary changes, and travel-related questions. Be friendly, knowledgeable, and concise."
 
     if trip:
-        trip_context = build_trip_context(trip)
+        trip_context = build_trip_context(trip, chat_msg.selected_tier)
         system_message += (
             f"\n\nYou are a travel assistant helping with the following trip:\n{trip_context}"
             f"\n\nUse this context to answer questions about the trip. If the user asks something "
