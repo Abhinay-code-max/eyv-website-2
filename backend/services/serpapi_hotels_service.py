@@ -10,6 +10,8 @@ import logging
 import httpx
 from typing import List, Dict, Optional
 
+from . import ignav_service
+
 logger = logging.getLogger(__name__)
 
 SERPAPI_KEY = os.environ.get('SERPAPI_KEY')
@@ -98,8 +100,10 @@ def _transform_serpapi_hotels(properties: List[Dict], nights: int, currency: str
             # Detect this and convert to INR so the UI stays consistent.
             returned_currency = (rate_info.get('currency', '') or '').upper()
             if returned_currency == 'USD' or (per_night < 500 and currency == 'INR'):
-                # Prices under ₹500/night are implausibly cheap - almost certainly USD
-                per_night = round(per_night * 83.0, 2)
+                # Prices under ₹500/night are implausibly cheap - almost certainly USD.
+                # Reuses the single canonical USD->INR conversion (services.ignav_service)
+                # instead of a second hardcoded rate.
+                per_night = ignav_service._to_inr(per_night, 'USD')
 
             # Star rating - SerpApi returns hotel_class as string like "3-star hotel"
             hotel_class_raw = prop.get('hotel_class', '') or ''
