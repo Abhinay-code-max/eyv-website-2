@@ -1918,11 +1918,33 @@ async def redeem_rewards(req: RedeemPointsRequest, request: Request):
 
 # ==================== Stripe Payments ====================
 
-# Fixed packages - amounts defined ONLY on backend
-PREMIUM_PLANS = {
-    "monthly": {"name": "EYV Premium Monthly", "amount": 9.99, "currency": "usd", "duration_days": 30},
-    "yearly": {"name": "EYV Premium Yearly", "amount": 99.00, "currency": "usd", "duration_days": 365},
+# Fixed packages - amounts defined ONLY on backend. USD is the canonical
+# base price; customers are charged in INR, converted at read time via the
+# app's live FX rate (services.ignav_service._to_inr) rather than a second
+# hardcoded INR number that would drift out of sync with the rate used
+# everywhere else. See _get_premium_plans().
+_PREMIUM_PLANS_USD = {
+    "monthly": {"name": "EYV Premium Monthly", "amount_usd": 9.99, "duration_days": 30},
+    "yearly": {"name": "EYV Premium Yearly", "amount_usd": 99.00, "duration_days": 365},
 }
+
+
+async def _get_premium_plans() -> Dict[str, Dict[str, Any]]:
+    """Premium plans priced in INR, converted from the canonical USD base
+    above using the app's live FX rate - no Stripe Price objects are
+    involved anywhere in this app (premium and bookings both already use
+    dynamic price_data), so there's nothing on the Stripe side to keep in
+    sync; this is the sole source of truth for the charged amount."""
+    await duffel_service._refresh_rates_if_stale()
+    return {
+        package_id: {
+            "name": plan["name"],
+            "amount": duffel_service._to_inr(plan["amount_usd"], "USD"),
+            "currency": "inr",
+            "duration_days": plan["duration_days"],
+        }
+        for package_id, plan in _PREMIUM_PLANS_USD.items()
+    }
 
 
 class CreateCheckoutRequest(BaseModel):
@@ -1948,9 +1970,10 @@ async def create_checkout(req: CreateCheckoutRequest, request: Request):
     # Determine amount based on backend logic
     if req.package_id:
         # Premium subscription
-        if req.package_id not in PREMIUM_PLANS:
+        premium_plans = await _get_premium_plans()
+        if req.package_id not in premium_plans:
             raise HTTPException(status_code=400, detail="Invalid package")
-        plan = PREMIUM_PLANS[req.package_id]
+        plan = premium_plans[req.package_id]
         amount = plan['amount']
         currency = plan['currency']
         description = plan['name']
@@ -2115,7 +2138,8 @@ async def _process_successful_payment(transaction: Dict):
     
     if payment_type == 'subscription':
         package_id = metadata.get('package_id')
-        plan = PREMIUM_PLANS.get(package_id)
+        premium_plans = await _get_premium_plans()
+        plan = premium_plans.get(package_id)
         if plan:
             expires_at = datetime.now(timezone.utc) + timedelta(days=plan['duration_days'])
             await db.users.update_one(
@@ -2245,7 +2269,7 @@ async def get_subscription_status(request: Request):
         'premium_status': premium_status,
         'premium_plan': user_doc.get('premium_plan') if user_doc else None,
         'premium_expires_at': user_doc.get('premium_expires_at') if user_doc else None,
-        'available_plans': PREMIUM_PLANS,
+        'available_plans': await _get_premium_plans(),
     }
 
 

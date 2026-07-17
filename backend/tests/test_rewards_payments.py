@@ -29,6 +29,18 @@ def _db():
     return AsyncIOMotorClient(MONGO_URL)[DB_NAME]
 
 
+def _expected_inr(usd_amount):
+    """Premium pricing is now converted from a USD base to INR via the
+    app's live FX rate at read time (see server._get_premium_plans), not a
+    fixed number - so tests compute the expected value the same way the
+    server does, rather than asserting a stale hardcoded literal."""
+    async def _compute():
+        from services import ignav_service
+        await ignav_service._refresh_rates_if_stale()
+        return ignav_service._to_inr(usd_amount, 'USD')
+    return _run(_compute())
+
+
 def _run(coro):
     return asyncio.get_event_loop().run_until_complete(coro)
 
@@ -146,8 +158,9 @@ def test_subscription_status_initial():
     assert data["is_premium"] is False
     assert "available_plans" in data
     assert "monthly" in data["available_plans"]
-    assert data["available_plans"]["monthly"]["amount"] == 9.99
-    assert data["available_plans"]["yearly"]["amount"] == 99.00
+    assert data["available_plans"]["monthly"]["amount"] == _expected_inr(9.99)
+    assert data["available_plans"]["monthly"]["currency"] == "inr"
+    assert data["available_plans"]["yearly"]["amount"] == _expected_inr(99.00)
 
 
 # ---------- Payments / Stripe Checkout ----------
@@ -173,15 +186,16 @@ def test_checkout_rejects_invalid_package():
 
 
 def test_checkout_rejects_frontend_amount():
-    """Frontend-supplied 'amount' must be ignored - server uses backend PREMIUM_PLANS dict."""
+    """Frontend-supplied 'amount' must be ignored - server computes the
+    premium price itself (USD base converted to INR via the live rate)."""
     r = requests.post(f"{BASE_URL}/api/payments/checkout",
                       json={"package_id": "monthly", "amount": 0.01,
                             "origin_url": "https://example.com"}, headers=HEADERS)
     assert r.status_code == 200, r.text
     data = r.json()
-    # Backend MUST use $9.99 from PREMIUM_PLANS regardless of frontend amount
-    assert data["amount"] == 9.99
-    assert data["currency"] == "usd"
+    # Backend MUST compute from its own USD base + live rate, regardless of frontend amount
+    assert data["amount"] == _expected_inr(9.99)
+    assert data["currency"] == "inr"
 
 
 @pytest.fixture(scope="module")
@@ -199,8 +213,8 @@ def test_checkout_monthly_creates_stripe_session(monthly_checkout):
     data = monthly_checkout
     assert "url" in data and "session_id" in data
     assert data["url"].startswith("https://checkout.stripe.com"), data["url"]
-    assert data["amount"] == 9.99
-    assert data["currency"] == "usd"
+    assert data["amount"] == _expected_inr(9.99)
+    assert data["currency"] == "inr"
 
 
 def test_checkout_yearly_creates_stripe_session():
@@ -210,7 +224,7 @@ def test_checkout_yearly_creates_stripe_session():
     assert r.status_code == 200, r.text
     data = r.json()
     assert data["url"].startswith("https://checkout.stripe.com")
-    assert data["amount"] == 99.0
+    assert data["amount"] == _expected_inr(99.00)
 
 
 def test_checkout_with_booking_id():
@@ -368,7 +382,7 @@ def test_payment_transaction_recorded():
     txn = _run(_check())
     assert txn is not None
     assert txn["payment_status"] == "pending"
-    assert txn["amount"] == 9.99
+    assert txn["amount"] == _expected_inr(9.99)
     assert txn["payment_type"] == "subscription"
     assert txn["metadata"]["package_id"] == "monthly"
     assert txn["metadata"]["user_id"] == USER_ID
