@@ -1352,17 +1352,22 @@ def build_trip_context(trip: dict, tier: Optional[str] = None) -> str:
     is omitted or doesn't match any generated plan, falls back to the
     trip's originally-requested preferences.budget_level, then to any tier
     that has one generated. destination/dates/travelers are trip-level
-    (from preferences) and don't vary by tier. Only populated fields are
-    included - nothing prints as "None" - and the itinerary digest is
-    capped at a handful of days so a long trip can't balloon the prompt.
+    (from preferences) and don't vary by tier. Each day's transportation
+    line (flights, transfers) is included alongside its activities, so
+    logistics questions ("how do I get from the airport to the hotel")
+    can be answered from what's already booked instead of the model
+    reaching for general knowledge. Only populated fields are included -
+    nothing prints as "None" - and the itinerary digest is capped at a
+    handful of days so a long trip can't balloon the prompt.
 
     Example: build_trip_context({"preferences": {"destination": "Goa",
     "departure_date": "2026-08-10", "return_date": "2026-08-14",
     "adults": 2, "budget_level": "Budget"}, "plans": [{"plan_type": "Budget",
-    "itinerary": {"day_1": {"activities": [{"activity": "Arrival"}]}}}]},
-    tier="Budget")
+    "itinerary": {"day_1": {"transportation": {"details": "Flight to Goa"},
+    "activities": [{"activity": "Arrival"}]}}}]}, tier="Budget")
     -> "Trip: Goa | Dates: 2026-08-10 to 2026-08-14 | Travelers: 2 adults |
-    Budget: Budget | Itinerary so far (Budget, 1 day(s)): Day 1 - Arrival"
+    Budget: Budget | Itinerary so far (Budget, 1 day(s)): Day 1 - Transport:
+    Flight to Goa; Arrival"
     """
     prefs = trip.get("preferences") or {}
     parts = []
@@ -1403,10 +1408,21 @@ def build_trip_context(trip: dict, tier: Optional[str] = None) -> str:
         day_summaries = []
         for day_key in day_keys[:MAX_DAYS_SHOWN]:
             day = itinerary.get(day_key) or {}
+            bits = []
+            # Transport (flights/transfers already booked as part of this
+            # day) goes first so the model sees it before activities - it's
+            # the detail logistics questions ("how do I get from the
+            # airport to the hotel") actually need, and it was previously
+            # dropped from this summary entirely.
+            transport_details = (day.get("transportation") or {}).get("details")
+            if transport_details:
+                bits.append(f"Transport: {transport_details}")
             activities = day.get("activities") or []
             themes = [a["activity"] for a in activities[:2] if a.get("activity")]
+            if themes:
+                bits.append(" + ".join(themes))
             label = day_key.replace("_", " ").capitalize()
-            day_summaries.append(f"{label} - {' + '.join(themes)}" if themes else label)
+            day_summaries.append(f"{label} - {'; '.join(bits)}" if bits else label)
         itinerary_line = "; ".join(day_summaries)
         if len(day_keys) > MAX_DAYS_SHOWN:
             itinerary_line += f"; plus {len(day_keys) - MAX_DAYS_SHOWN} more day(s)"
@@ -1458,7 +1474,11 @@ async def chat_stream(chat_msg: ChatMessage, request: Request):
         system_message += (
             f"\n\nYou are a travel assistant helping with the following trip:\n{trip_context}"
             f"\n\nUse this context to answer questions about the trip. If the user asks something "
-            f"unrelated to this trip, answer normally."
+            f"unrelated to this trip, answer normally. For logistics questions (airport transfers, "
+            f"travel times, getting between locations), check this trip's own transportation and "
+            f"itinerary data first - the user may already have a flight or transfer booked that "
+            f"answers the question - and only fall back to general travel knowledge if the trip "
+            f"data doesn't cover it."
         )
 
     history = await chat_service.get_recent_messages(db, user.user_id, chat_msg.trip_id, limit=20)
