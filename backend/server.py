@@ -1985,6 +1985,7 @@ async def create_checkout(req: CreateCheckoutRequest, request: Request):
             # live for real Ignav flight-price INR conversion (duffel_service
             # is services.ignav_service under its historical alias) instead
             # of a second, separate hardcoded rate.
+            await duffel_service._refresh_rates_if_stale()
             discount_usd = req.use_points * rewards_service.POINTS_TO_USD
             if currency == 'usd':
                 discount = discount_usd
@@ -2266,6 +2267,14 @@ async def startup_event():
         await chat_service.ensure_indexes(db)
     except Exception as e:
         logger.warning(f"chat index setup failed at startup: {e}")
+    try:
+        # Warm the FX rate cache eagerly so the first real request doesn't
+        # pay the fetch latency - _refresh_rates_if_stale() also runs lazily
+        # from every conversion call site, so this is a nice-to-have, not
+        # load-bearing (a failure here just means the first live call does it).
+        await duffel_service._refresh_rates_if_stale()
+    except Exception as e:
+        logger.warning(f"FX rate warm-up failed at startup: {e}")
 
 
 app.include_router(api_router)

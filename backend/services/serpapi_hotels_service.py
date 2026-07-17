@@ -36,6 +36,8 @@ async def search_hotels(
         logger.warning("SERPAPI_KEY not configured, returning empty hotel results")
         return []
 
+    await ignav_service._refresh_rates_if_stale()
+
     try:
         # Calculate number of nights for total price
         from datetime import date

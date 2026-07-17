@@ -7,6 +7,7 @@ Same output shape as all previous flight services.
 import os
 import logging
 import httpx
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Optional
 
 from .airport_codes import get_iata_code
@@ -16,7 +17,11 @@ logger = logging.getLogger(__name__)
 IGNAV_API_KEY = os.environ.get('IGNAV_API_KEY')
 IGNAV_BASE_URL = "https://ignav.com/api/fares"
 
-_RATES_TO_INR = {
+# Hardcoded safety-net rates - only used if a live rate has NEVER been
+# fetched successfully (fresh deploy with the FX API unreachable since
+# startup). Normal operation uses _cached_rates below, refreshed daily
+# from a real FX source - see _refresh_rates_if_stale().
+_FALLBACK_RATES_TO_INR = {
     'USD': 83.0,
     'EUR': 90.0,
     'GBP': 105.0,
@@ -27,6 +32,74 @@ _RATES_TO_INR = {
     'INR': 1.0,
 }
 
+# open.er-api.com's key-free endpoint - no signup, no API key, updated
+# daily. Returns all currencies against a USD base in one call, which we
+# convert into "multiply by this to get INR" rates for every currency it
+# knows about (not just the 8 above) - so a new pair like EUR->INR needs
+# no code change, just _to_inr("...", "EUR") on already-cached data.
+_FX_API_URL = "https://open.er-api.com/v6/latest/USD"
+_REFRESH_INTERVAL = timedelta(hours=24)
+_RETRY_BACKOFF = timedelta(minutes=5)  # don't hammer the API while it's down
+
+_cached_rates: Optional[Dict[str, float]] = None
+_last_fetch_success: Optional[datetime] = None
+_last_fetch_attempt: Optional[datetime] = None
+
+
+async def _refresh_rates_if_stale() -> None:
+    """Refresh the live FX table roughly once a day.
+
+    Cheap no-op after the first call each day (a couple of datetime
+    comparisons), so it's safe to call from every conversion-using
+    endpoint without worrying about hammering the FX API. On failure,
+    retries back off to once every _RETRY_BACKOFF rather than firing on
+    every request while the API is down - _to_inr keeps using the last
+    known-good cached rate in the meantime, or the hardcoded
+    _FALLBACK_RATES_TO_INR (loudly logged as degraded) if a rate has
+    never been fetched successfully at all.
+    """
+    global _cached_rates, _last_fetch_success, _last_fetch_attempt
+    now = datetime.now(timezone.utc)
+
+    if _last_fetch_success is not None and now - _last_fetch_success < _REFRESH_INTERVAL:
+        return
+    if _last_fetch_attempt is not None and now - _last_fetch_attempt < _RETRY_BACKOFF:
+        return
+
+    _last_fetch_attempt = now
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(_FX_API_URL)
+            resp.raise_for_status()
+            data = resp.json()
+
+        if data.get("result") != "success":
+            raise ValueError(f"FX API returned non-success result: {data.get('result')!r}")
+
+        usd_rates = data["rates"]
+        inr_per_usd = usd_rates["INR"]
+        _cached_rates = {
+            code: round(inr_per_usd / rate, 6)
+            for code, rate in usd_rates.items()
+            if rate
+        }
+        _last_fetch_success = now
+        logger.info(
+            f"FX rates refreshed from {_FX_API_URL}: 1 USD = {_cached_rates['USD']:.4f} INR"
+        )
+    except Exception as e:
+        if _cached_rates is not None:
+            logger.warning(
+                f"FX rate refresh failed ({e}); continuing with the last successfully "
+                f"fetched rate from {_last_fetch_success.isoformat() if _last_fetch_success else 'unknown'}"
+            )
+        else:
+            logger.warning(
+                f"FX rate refresh failed ({e}) and no rate has ever been fetched "
+                f"successfully - falling back to hardcoded safety-net rates "
+                f"(USD->INR = {_FALLBACK_RATES_TO_INR['USD']}). DEGRADED MODE."
+            )
+
 
 def _headers() -> Dict[str, str]:
     return {
@@ -36,7 +109,9 @@ def _headers() -> Dict[str, str]:
 
 
 def _to_inr(amount: float, currency: str) -> float:
-    rate = _RATES_TO_INR.get(currency.upper(), 83.0)
+    currency = currency.upper()
+    rates = _cached_rates if _cached_rates is not None else _FALLBACK_RATES_TO_INR
+    rate = rates.get(currency, rates.get('USD', 83.0))
     return round(amount * rate, 2)
 
 
@@ -67,6 +142,8 @@ async def search_flights(
     if not IGNAV_API_KEY:
         logger.warning("IGNAV_API_KEY not set")
         return []
+
+    await _refresh_rates_if_stale()
 
     origin_iata = _resolve_iata(origin)
     dest_iata = _resolve_iata(destination)
