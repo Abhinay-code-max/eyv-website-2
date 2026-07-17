@@ -312,7 +312,7 @@ const TripResultsPage = () => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ message: chatMessage, trip_id: tripId }),
+        body: JSON.stringify({ message: chatMessage, trip_id: tripId, selected_tier: selectedPlan?.plan_type }),
       });
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
