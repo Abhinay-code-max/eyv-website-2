@@ -7,6 +7,8 @@ import logging
 from typing import Optional
 from datetime import datetime, timezone
 
+from . import ignav_service
+
 logger = logging.getLogger(__name__)
 
 # Earning rules
@@ -149,11 +151,20 @@ async def get_user_rewards_summary(db, user_id: str) -> dict:
         {'user_id': user_id},
         {'_id': 0}
     ).sort('created_at', -1).to_list(50)
-    
+
+    # available_discount_usd is the canonical value (100 points = $1); the
+    # INR figure alongside it is derived from that same live FX rate
+    # already used everywhere else (services.ignav_service), not a new
+    # conversion - kept alongside the USD value rather than replacing it.
+    available_discount_usd = rewards['available_points'] * POINTS_TO_USD
+    await ignav_service._refresh_rates_if_stale()
+    available_discount_inr = ignav_service._to_inr(available_discount_usd, 'USD')
+
     return {
         'available_points': rewards['available_points'],
         'lifetime_points': rewards['lifetime_points'],
-        'available_discount_usd': rewards['available_points'] * POINTS_TO_USD,
+        'available_discount_usd': available_discount_usd,
+        'available_discount_inr': available_discount_inr,
         'current_tier': tier,
         'next_tier': next_tier,
         'points_to_next_tier': (next_tier['min_points'] - rewards['lifetime_points']) if next_tier else 0,

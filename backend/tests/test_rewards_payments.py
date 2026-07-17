@@ -57,8 +57,12 @@ def test_rewards_summary_structure():
     assert r.status_code == 200, r.text
     data = r.json()
     for k in ("available_points", "lifetime_points", "available_discount_usd",
-              "current_tier", "transactions", "earn_rules", "all_tiers"):
+              "available_discount_inr", "current_tier", "transactions",
+              "earn_rules", "all_tiers"):
         assert k in data, f"missing {k}"
+    # available_discount_inr is available_discount_usd converted via the
+    # same live FX rate everything else uses - not a second/new conversion.
+    assert data["available_discount_inr"] == _expected_inr(data["available_discount_usd"])
     # 4 tiers
     assert len(data["all_tiers"]) == 4
     tier_names = [t["name"] for t in data["all_tiers"]]

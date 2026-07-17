@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { API_URL } from '../constants';
 import { REWARDS } from '../constants/testIds';
+import { formatCurrency } from '../lib/currency';
 import EYVLogo from '../components/EYVLogo';
 import { Button } from '../components/ui/button';
 
@@ -145,7 +146,7 @@ const RewardsPage = ({ user }) => {
                   <AnimatedNumber value={data.available_points} />
                 </p>
                 <p className="text-white/70 text-sm mt-1">
-                  ≈ ${data.available_discount_usd.toFixed(2)} discount
+                  ≈ {formatCurrency(data.available_discount_inr, 'INR')} discount
                 </p>
               </div>
               <div>
