@@ -59,6 +59,17 @@ ADMIN_API_KEY = os.environ.get('ADMIN_API_KEY')
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
 
+# Captured once at import time (i.e. whenever this worker process actually
+# started running THIS copy of the code) - GET /api/ surfaces both so a
+# "did my restart actually pick up fresh code" check never has to rely on
+# OS-level process inspection (netstat/tasklist's reported owning PID for a
+# listening socket can go stale if a worker outlives its parent, e.g. a
+# multiprocessing-spawned uvicorn worker left running after its reloader
+# process exited - the PID here is the actual process answering requests,
+# not whatever a socket table happens to attribute the port to).
+_SERVER_STARTED_AT = datetime.now(timezone.utc)
+_SERVER_PID = os.getpid()
+
 # ── Rate limiting ────────────────────────────────────────────────────────
 # In-memory storage: no Redis in this deployment (single process, no
 # multi-worker/multi-instance setup) - if that changes, point these at
@@ -1544,7 +1555,11 @@ async def get_chat_history(trip_id: str, request: Request):
 
 @api_router.get("/")
 async def root():
-    return {"message": "EYV API - Enjoy Your Vacation"}
+    return {
+        "message": "EYV API - Enjoy Your Vacation",
+        "server_started_at": _SERVER_STARTED_AT.isoformat(),
+        "server_pid": _SERVER_PID,
+    }
 
 
 # ==================== Booking Search Endpoints ====================
