@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import { API_URL } from '../constants';
 import { TRIP_PLANNER } from '../constants/testIds';
+import { getCurrencySymbol, formatCurrency, formatNumber } from '../lib/currency';
 import TripLoadingScreen from '../components/TripLoadingScreen';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -379,8 +380,7 @@ const TripResultsPage = () => {
   }
 
   const ps = planStyle(selectedPlan?.plan_type);
-  const currencySymbol = selectedPlan?.currency_symbol || (selectedPlan?.currency === 'INR' ? '₹' : '$');
-  const formatCost = (val) => `${currencySymbol}${(val ?? 0).toLocaleString()}`;
+  const formatCost = (val) => formatCurrency(val, selectedPlan?.currency);
 
   return (
     <div data-testid={TRIP_PLANNER.plannerForm} className="min-h-screen bg-[#FDFBF7]">
@@ -469,10 +469,10 @@ const TripResultsPage = () => {
                   ) : (
                     <div className="flex items-baseline gap-1 mb-4">
                       <span className="text-2xl font-semibold" style={{ color: style.accent }}>
-                        {plan.currency_symbol || (plan.currency === 'INR' ? '₹' : '$')}
+                        {getCurrencySymbol(plan.currency)}
                       </span>
                       <span className="text-4xl font-semibold text-[#1C1917]">
-                        {plan.total_cost?.toLocaleString() || 'N/A'}
+                        {plan.total_cost != null ? formatNumber(plan.total_cost, plan.currency) : 'N/A'}
                       </span>
                     </div>
                   )}

@@ -10,24 +10,14 @@ import {
 } from 'lucide-react';
 import { API_URL } from '../constants';
 import { BOOKINGS } from '../constants/testIds';
+import { formatCurrency } from '../lib/currency';
 import EYVLogo from '../components/EYVLogo';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
 
-/* ── Currency helpers ──────────────────────────────────────────────────── */
-const currencySymbol = (c = 'INR') => {
-  const code = c.toUpperCase();
-  if (code === 'INR') return '₹';
-  if (code === 'EUR') return '€';
-  if (code === 'GBP') return '£';
-  return '$';
-};
-const fmt = (priceObj, field = 'total') => {
-  const sym = currencySymbol(priceObj?.currency);
-  const val = priceObj?.[field] ?? 0;
-  return `${sym}${Number(val).toLocaleString('en-IN')}`;
-};
+/* ── Currency helper ───────────────────────────────────────────────────── */
+const fmt = (priceObj, field = 'total') => formatCurrency(priceObj?.[field], priceObj?.currency);
 
 /* ── Airline logo helper ───────────────────────────────────────────────── */
 const AIRLINE_CODES = {
@@ -671,7 +661,7 @@ const BookingPage = ({ user }) => {
                         </div>
                         <div className="text-right">
                           <div className="text-2xl font-semibold text-[#C47245]">
-                            {currencySymbol(booking.currency)}{Number(booking.total_amount).toLocaleString('en-IN')}
+                            {formatCurrency(booking.total_amount, booking.currency)}
                           </div>
                           <div className="flex items-center gap-1 text-xs text-[#57534E] mt-1 justify-end">
                             <Clock size={11} />{new Date(booking.created_at).toLocaleDateString()}

@@ -5,6 +5,7 @@ import { motion } from 'framer-motion';
 import { ArrowLeft, Crown, Check, Sparkles, Zap, Headphones, Star, X } from 'lucide-react';
 import { API_URL } from '../constants';
 import { PREMIUM } from '../constants/testIds';
+import { formatCurrency } from '../lib/currency';
 import EYVLogo from '../components/EYVLogo';
 import { Button } from '../components/ui/button';
 
@@ -169,7 +170,7 @@ const PremiumPage = ({ user }) => {
                   Monthly
                 </h3>
                 <div className="flex items-baseline gap-2 mb-4">
-                  <span className="text-5xl font-semibold text-[#1C1917]">${plans.monthly?.amount}</span>
+                  <span className="text-5xl font-semibold text-[#1C1917]">{formatCurrency(plans.monthly?.amount, plans.monthly?.currency)}</span>
                   <span className="text-[#57534E]">/month</span>
                 </div>
                 <p className="text-sm text-[#57534E] mb-6">Cancel anytime. Billed monthly.</p>
@@ -200,10 +201,12 @@ const PremiumPage = ({ user }) => {
                   Yearly
                 </h3>
                 <div className="flex items-baseline gap-2 mb-1">
-                  <span className="text-5xl font-semibold text-[#1C1917]">${plans.yearly?.amount}</span>
+                  <span className="text-5xl font-semibold text-[#1C1917]">{formatCurrency(plans.yearly?.amount, plans.yearly?.currency)}</span>
                   <span className="text-[#57534E]">/year</span>
                 </div>
-                <p className="text-sm text-green-600 font-medium mb-4">Save $20 vs monthly</p>
+                <p className="text-sm text-green-600 font-medium mb-4">
+                  Save {formatCurrency((plans.monthly?.amount ?? 0) * 12 - (plans.yearly?.amount ?? 0), plans.yearly?.currency)} vs monthly
+                </p>
                 <p className="text-sm text-[#57534E] mb-6">Best value. Billed annually.</p>
                 <ul className="space-y-2">
                   <li className="flex items-center gap-2 text-sm text-[#1C1917]">
@@ -232,7 +235,7 @@ const PremiumPage = ({ user }) => {
                 {processing ? 'Processing...' : (
                   <>
                     <Crown size={20} />
-                    Subscribe to {selectedPlan === 'monthly' ? 'Monthly' : 'Yearly'} - ${plans[selectedPlan]?.amount}
+                    Subscribe to {selectedPlan === 'monthly' ? 'Monthly' : 'Yearly'} - {formatCurrency(plans[selectedPlan]?.amount, plans[selectedPlan]?.currency)}
                   </>
                 )}
               </Button>

@@ -5,6 +5,7 @@ import { motion } from 'framer-motion';
 import { Check, X, Loader, Crown, Award } from 'lucide-react';
 import { API_URL } from '../constants';
 import { PAYMENT } from '../constants/testIds';
+import { formatCurrency } from '../lib/currency';
 import EYVLogo from '../components/EYVLogo';
 import { Button } from '../components/ui/button';
 
@@ -95,7 +96,7 @@ const PaymentSuccessPage = () => {
                 Payment Successful!
               </h1>
               <p className="text-[#57534E] mb-6">
-                Your payment of ${details?.amount?.toFixed(2)} {details?.currency?.toUpperCase()} has been processed successfully.
+                Your payment of {formatCurrency(details?.amount, details?.currency)} has been processed successfully.
               </p>
             </div>
             
