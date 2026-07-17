@@ -1978,7 +1978,23 @@ async def create_checkout(req: CreateCheckoutRequest, request: Request):
             rewards = await rewards_service.get_or_create_rewards(db, user.user_id)
             if rewards['available_points'] < req.use_points:
                 raise HTTPException(status_code=400, detail="Insufficient points")
-            discount = req.use_points * rewards_service.POINTS_TO_USD
+            # POINTS_TO_USD is a USD-denominated canonical point value ("100
+            # points = $1") - it must be converted into the booking's own
+            # `currency` before being subtracted from `amount`, which is in
+            # that same native currency. Reuses the same FX table already
+            # live for real Ignav flight-price INR conversion (duffel_service
+            # is services.ignav_service under its historical alias) instead
+            # of a second, separate hardcoded rate.
+            discount_usd = req.use_points * rewards_service.POINTS_TO_USD
+            if currency == 'usd':
+                discount = discount_usd
+            elif currency == 'inr':
+                discount = duffel_service._to_inr(discount_usd, 'USD')
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Points redemption is not supported for currency '{currency}'",
+                )
             amount = max(0.50, amount - discount)  # Minimum charge $0.50
         
         metadata = {
