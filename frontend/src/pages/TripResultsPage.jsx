@@ -317,22 +317,36 @@ const TripResultsPage = () => {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let fullMessage = '';
-      while (true) {
+      let buffer = '';
+      let streamDone = false;
+      while (!streamDone) {
         const { done, value } = await reader.read();
         if (done) break;
-        const chunk = decoder.decode(value);
-        const lines = chunk.split('\n');
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const data = line.slice(6);
-            if (data === '[DONE]') {
-              setChatHistory(prev => [...prev, { role: 'assistant', content: fullMessage }]);
-              setStreamingMessage('');
-              break;
-            }
-            fullMessage += data;
-            setStreamingMessage(fullMessage);
+        // `value` can split mid-event (or mid multi-byte char) across reads,
+        // so accumulate into `buffer` and only process complete "\n\n"-terminated
+        // SSE events - each event's "data: " lines are joined back with "\n" to
+        // restore any newline the backend's chunk text originally contained
+        // (a single "data: {chunk}\n\n" would silently lose everything after
+        // the first line of a multi-line chunk).
+        buffer += decoder.decode(value, { stream: true });
+        let boundary;
+        while ((boundary = buffer.indexOf('\n\n')) !== -1) {
+          const rawEvent = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+          const dataLines = rawEvent
+            .split('\n')
+            .filter((line) => line.startsWith('data: '))
+            .map((line) => line.slice(6));
+          if (dataLines.length === 0) continue;
+          const eventText = dataLines.join('\n');
+          if (eventText === '[DONE]') {
+            setChatHistory(prev => [...prev, { role: 'assistant', content: fullMessage }]);
+            setStreamingMessage('');
+            streamDone = true;
+            break;
           }
+          fullMessage += eventText;
+          setStreamingMessage(fullMessage);
         }
       }
     } catch (error) {

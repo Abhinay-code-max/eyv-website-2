@@ -1417,6 +1417,20 @@ def build_trip_context(trip: dict, tier: Optional[str] = None) -> str:
     return " | ".join(parts)
 
 
+def _sse_data(text: str) -> str:
+    """Encode `text` as a spec-compliant SSE data event.
+
+    A naive f"data: {text}\\n\\n" breaks the moment `text` contains an
+    embedded newline (e.g. a paragraph break within a single Gemini
+    stream chunk): per the SSE spec, every line of a multi-line data
+    payload needs its own "data:" prefix, or a line-by-line client
+    parser (like the one in TripResultsPage.jsx) silently drops any
+    continuation line that lacks the prefix - the response looks
+    truncated in the UI even though the full text was sent and saved.
+    """
+    return "".join(f"data: {line}\n" for line in text.split("\n")) + "\n"
+
+
 # AI Assistant Chat
 @api_router.post("/chat/stream")
 @limiter.limit("15/minute")  # per-IP - a live back-and-forth chat is bursty by nature
@@ -1468,12 +1482,12 @@ async def chat_stream(chat_msg: ChatMessage, request: Request):
             async for chunk in stream:
                 if chunk.text:
                     full_response += chunk.text
-                    yield f"data: {chunk.text}\n\n"
+                    yield _sse_data(chunk.text)
             await chat_service.append_exchange(db, user.user_id, chat_msg.trip_id, chat_msg.message, full_response)
-            yield "data: [DONE]\n\n"
+            yield _sse_data("[DONE]")
         except Exception as e:
             logger.error(f"Chat stream error: {e}")
-            yield f"data: Error: {str(e)}\n\n"
+            yield _sse_data(f"Error: {str(e)}")
     
     return StreamingResponse(
         event_generator(),
