@@ -25,6 +25,7 @@ from openai import AsyncOpenAI
 from google import genai
 from google.genai import types as genai_types
 import stripe
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from services import amadeus_service, storage_service, rewards_service, locations_service
 from services import ignav_service as duffel_service  # Ignav replaces Sky Scrapper
 from services import serpapi_hotels_service
@@ -32,6 +33,7 @@ from services import price_cache_service
 from services import log_redaction
 from services import quota_service, usage_service
 from services import chat_service
+from services import booking_expiry_service
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -2354,6 +2356,16 @@ async def get_subscription_status(request: Request):
     }
 
 
+# Stale-pending-booking sweep - a safety net for missed/undelivered
+# checkout.session.expired webhooks (e.g. the user closing the tab before
+# Stripe Checkout even loaded, so no session-level event ever fires; or a
+# dropped webhook delivery). See services/booking_expiry_service.py. In-
+# process only (no Redis/external broker in this single-process deployment
+# - same reasoning as the rate limiter above), so this only runs in
+# whichever single worker process is up.
+_booking_expiry_scheduler = AsyncIOScheduler()
+
+
 @app.on_event("startup")
 async def startup_event():
     try:
@@ -2380,6 +2392,18 @@ async def startup_event():
         await duffel_service._refresh_rates_if_stale()
     except Exception as e:
         logger.warning(f"FX rate warm-up failed at startup: {e}")
+    try:
+        _booking_expiry_scheduler.add_job(
+            booking_expiry_service.expire_stale_pending_bookings,
+            "interval",
+            minutes=10,
+            args=[db],
+            id="expire_stale_pending_bookings",
+        )
+        _booking_expiry_scheduler.start()
+        logger.info("Booking-expiry scheduler started (10-minute interval)")
+    except Exception as e:
+        logger.warning(f"Booking-expiry scheduler failed to start: {e}")
 
 
 app.include_router(api_router)
@@ -2394,4 +2418,5 @@ app.add_middleware(
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
+    _booking_expiry_scheduler.shutdown(wait=False)
     client.close()
