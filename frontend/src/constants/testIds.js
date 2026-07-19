@@ -28,6 +28,7 @@ export const TRIP_PLANNER = {
   budgetCard: 'budget-plan-card',
   premiumCard: 'premium-plan-card',
   luxuryCard: 'luxury-plan-card',
+  quotaBanner: 'trip-quota-banner',
 };
 
 export const DASHBOARD = {
@@ -89,6 +90,10 @@ export const PREMIUM = {
   yearlyPlan: 'premium-yearly-plan',
   subscribeButton: 'premium-subscribe-button',
   premiumBadge: 'premium-badge',
+  cancelButton: 'premium-cancel-button',
+  resumeButton: 'premium-resume-button',
+  pastDueNotice: 'premium-past-due-notice',
+  updatePaymentButton: 'premium-update-payment-button',
 };
 
 export const PAYMENT = {

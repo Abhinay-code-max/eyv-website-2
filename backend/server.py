@@ -2570,6 +2570,36 @@ async def resume_subscription(request: Request):
     return await _subscription_status_payload(user.user_id)
 
 
+class CreatePortalSessionRequest(BaseModel):
+    return_url: str
+
+
+@api_router.post("/subscription/portal")
+async def create_subscription_portal_session(req: CreatePortalSessionRequest, request: Request):
+    """Stripe-hosted Customer Portal session - used for the past_due
+    "update payment method" action (Part 5) rather than building custom
+    card-update UI. Also lets a user see invoices/payment history for
+    free, without any more of our own UI. Requires a portal configuration
+    to already exist for this account (Dashboard > Settings > Billing >
+    Customer portal, or stripe.billingPortal.Configuration.create) -
+    Stripe returns a clear error naming exactly that if none exists yet,
+    which this deliberately doesn't paper over by auto-creating one."""
+    user = await get_current_user(request)
+    user_doc = await db.users.find_one(
+        {'user_id': user.user_id}, {'_id': 0, 'stripe_customer_id': 1}
+    )
+    if not user_doc or not user_doc.get('stripe_customer_id'):
+        raise HTTPException(status_code=400, detail="No billing account to manage")
+
+    _ensure_stripe_configured()
+    portal_session = await asyncio.to_thread(
+        stripe.billing_portal.Session.create,
+        customer=user_doc['stripe_customer_id'],
+        return_url=req.return_url,
+    )
+    return {'url': portal_session.url}
+
+
 # Stale-pending-booking sweep - a safety net for missed/undelivered
 # checkout.session.expired webhooks (e.g. the user closing the tab before
 # Stripe Checkout even loaded, so no session-level event ever fires; or a

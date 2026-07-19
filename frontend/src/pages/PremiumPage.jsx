@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { motion } from 'framer-motion';
-import { ArrowLeft, Crown, Check, Sparkles, Zap, Headphones, Star, X } from 'lucide-react';
+import { ArrowLeft, Crown, Check, Sparkles, Zap, Headphones, Star, X, AlertTriangle } from 'lucide-react';
 import { API_URL } from '../constants';
 import { PREMIUM } from '../constants/testIds';
 import { formatCurrency } from '../lib/currency';
@@ -14,6 +14,7 @@ const PremiumPage = ({ user }) => {
   const [status, setStatus] = useState(null);
   const [loading, setLoading] = useState(true);
   const [processing, setProcessing] = useState(false);
+  const [actionProcessing, setActionProcessing] = useState(null); // null | 'cancel' | 'resume' | 'portal'
   const [selectedPlan, setSelectedPlan] = useState('yearly');
 
   useEffect(() => {
@@ -42,7 +43,7 @@ const PremiumPage = ({ user }) => {
         },
         { withCredentials: true }
       );
-      
+
       // Redirect to Stripe Checkout
       if (response.data.url) {
         window.location.href = response.data.url;
@@ -51,6 +52,55 @@ const PremiumPage = ({ user }) => {
       console.error('Subscription error:', error);
       alert('Failed to start checkout. Please try again.');
       setProcessing(false);
+    }
+  };
+
+  const handleCancel = async () => {
+    if (!window.confirm(
+      "Cancel your Premium subscription? You'll keep full access until the end of your current billing period - it just won't renew after that."
+    )) {
+      return;
+    }
+    setActionProcessing('cancel');
+    try {
+      const response = await axios.post(`${API_URL}/subscription/cancel`, {}, { withCredentials: true });
+      setStatus(response.data);
+    } catch (error) {
+      console.error('Cancel subscription error:', error);
+      alert('Could not cancel your subscription. Please try again.');
+    } finally {
+      setActionProcessing(null);
+    }
+  };
+
+  const handleResume = async () => {
+    setActionProcessing('resume');
+    try {
+      const response = await axios.post(`${API_URL}/subscription/resume`, {}, { withCredentials: true });
+      setStatus(response.data);
+    } catch (error) {
+      console.error('Resume subscription error:', error);
+      alert('Could not resume your subscription. Please try again.');
+    } finally {
+      setActionProcessing(null);
+    }
+  };
+
+  const handleManageBilling = async () => {
+    setActionProcessing('portal');
+    try {
+      const response = await axios.post(
+        `${API_URL}/subscription/portal`,
+        { return_url: window.location.href },
+        { withCredentials: true }
+      );
+      if (response.data.url) {
+        window.location.href = response.data.url;
+      }
+    } catch (error) {
+      console.error('Billing portal error:', error);
+      alert('Could not open billing management. Please try again.');
+      setActionProcessing(null);
     }
   };
 
@@ -115,7 +165,7 @@ const PremiumPage = ({ user }) => {
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
-            className="bg-gradient-to-r from-[#C47245] to-[#E8B273] text-white rounded-2xl p-8 mb-12 text-center"
+            className="bg-gradient-to-r from-[#C47245] to-[#E8B273] text-white rounded-2xl p-8 mb-6 text-center"
           >
             <Crown size={48} className="mx-auto mb-4" />
             <h2 className="text-3xl font-semibold mb-2" style={{ fontFamily: 'Cormorant Garamond, serif' }}>
@@ -123,8 +173,73 @@ const PremiumPage = ({ user }) => {
             </h2>
             <p className="text-white/90">
               {status.premium_plan === 'monthly' ? 'Monthly Plan' : 'Yearly Plan'}
-              {status.premium_expires_at && ` • Renews ${new Date(status.premium_expires_at).toLocaleDateString()}`}
+              {status.current_period_end && (
+                status.cancel_at_period_end
+                  ? ` • Access ends ${new Date(status.current_period_end).toLocaleDateString()}`
+                  : ` • Renews ${new Date(status.current_period_end).toLocaleDateString()}`
+              )}
             </p>
+
+            <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
+              {status.cancel_at_period_end ? (
+                <Button
+                  data-testid={PREMIUM.resumeButton}
+                  onClick={handleResume}
+                  disabled={actionProcessing === 'resume'}
+                  variant="outline"
+                  className="bg-white/10 border-white/40 text-white hover:bg-white/20"
+                >
+                  {actionProcessing === 'resume' ? 'Resuming…' : 'Resume Subscription'}
+                </Button>
+              ) : (
+                <Button
+                  data-testid={PREMIUM.cancelButton}
+                  onClick={handleCancel}
+                  disabled={actionProcessing === 'cancel'}
+                  variant="outline"
+                  className="bg-white/10 border-white/40 text-white hover:bg-white/20"
+                >
+                  {actionProcessing === 'cancel' ? 'Cancelling…' : 'Cancel Subscription'}
+                </Button>
+              )}
+            </div>
+            <button
+              onClick={handleManageBilling}
+              disabled={actionProcessing === 'portal'}
+              className="mt-4 text-sm text-white/80 underline hover:text-white"
+            >
+              {actionProcessing === 'portal' ? 'Opening…' : 'Manage billing & payment methods'}
+            </button>
+          </motion.div>
+        )}
+
+        {/* Past-due notice - access stays on during Stripe's own retry
+            window (is_user_premium treats past_due as active - see
+            server.py), this is purely informational + a fix-it action,
+            not an alarming "you've lost access" message. */}
+        {status?.subscription_status === 'past_due' && (
+          <motion.div
+            data-testid={PREMIUM.pastDueNotice}
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="bg-amber-50 border border-amber-200 rounded-2xl p-6 mb-12 flex flex-col sm:flex-row items-start sm:items-center gap-4"
+          >
+            <AlertTriangle className="text-amber-600 shrink-0" size={22} />
+            <div className="flex-1">
+              <p className="font-medium text-amber-900">There's an issue with your last payment</p>
+              <p className="text-sm text-amber-800 mt-1">
+                Your Premium benefits are still active while we retry the charge - update
+                your payment method to keep things running smoothly.
+              </p>
+            </div>
+            <Button
+              data-testid={PREMIUM.updatePaymentButton}
+              onClick={handleManageBilling}
+              disabled={actionProcessing === 'portal'}
+              className="bg-amber-600 hover:bg-amber-700 text-white shrink-0"
+            >
+              {actionProcessing === 'portal' ? 'Opening…' : 'Update Payment Method'}
+            </Button>
           </motion.div>
         )}
 
