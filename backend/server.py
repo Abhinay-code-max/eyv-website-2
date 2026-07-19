@@ -2388,13 +2388,27 @@ async def _process_successful_payment(transaction: Dict):
                 except ValueError:
                     pass  # Already validated at checkout
             
-            # Award points for the booking
-            action = 'booking_flight' if booking.get('booking_type') == 'flight' else 'booking_hotel'
-            await rewards_service.award_points(
-                db, user_id, action,
-                reference_id=booking_id,
-                description=f"Earned for {booking.get('booking_type')} booking"
-            )
+            # Award points for the booking. A bundle earns points for each
+            # bookable type it actually contains (same as booking a flight
+            # and a hotel separately would have) rather than falling into
+            # the single-item flight/hotel branch below, which only ever
+            # awards one type.
+            if booking.get('booking_type') == 'bundle':
+                for line_item in booking.get('line_items', []):
+                    item_type = line_item.get('type')
+                    action = 'booking_flight' if item_type == 'flight' else 'booking_hotel'
+                    await rewards_service.award_points(
+                        db, user_id, action,
+                        reference_id=f"{booking_id}:{item_type}",
+                        description=f"Earned for {item_type} in bundled booking"
+                    )
+            else:
+                action = 'booking_flight' if booking.get('booking_type') == 'flight' else 'booking_hotel'
+                await rewards_service.award_points(
+                    db, user_id, action,
+                    reference_id=booking_id,
+                    description=f"Earned for {booking.get('booking_type')} booking"
+                )
 
 
 async def _process_expired_payment(transaction: Dict):
