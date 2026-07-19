@@ -7,10 +7,15 @@ Endpoints under test:
 - /api/webhook/stripe (POST)
 """
 import os
+import sys
 import asyncio
 import pytest
 import requests
 from motor.motor_asyncio import AsyncIOMotorClient
+
+BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, BACKEND_DIR)
+import server  # noqa: E402
 
 BASE_URL = os.environ.get(
     'REACT_APP_BACKEND_URL',
@@ -42,7 +47,14 @@ def _expected_inr(usd_amount):
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    # asyncio.run, not get_event_loop().run_until_complete(...) - the latter
+    # raises "There is no current event loop in thread" on Python 3.14's
+    # tightened asyncio (see test_rate_limit_quota.py, which already made
+    # this exact fix). Encountered while touching this file for the
+    # subscription-state field rename below - fixing it here too since
+    # otherwise there's no way to actually run test_idempotent_post_payment_processing
+    # to verify that rewrite.
+    return asyncio.run(coro)
 
 
 # ---------- Rewards ----------
@@ -152,8 +164,10 @@ def test_subscription_status_initial():
         db = _db()
         await db.users.update_one(
             {"user_id": USER_ID},
-            {"$unset": {"premium_status": "", "premium_plan": "",
-                        "premium_expires_at": "", "premium_started_at": ""}}
+            {"$unset": {"stripe_subscription_status": "", "premium_plan": "",
+                        "current_period_end": "", "premium_started_at": "",
+                        "stripe_subscription_id": "", "stripe_customer_id": "",
+                        "cancel_at_period_end": ""}}
         )
     _run(_setup())
     r = requests.get(f"{BASE_URL}/api/subscription/status", headers=AUTH_HEADER)
@@ -288,8 +302,20 @@ def test_payment_status_not_found():
 # ---------- Idempotency + post-payment side effects ----------
 
 def test_idempotent_post_payment_processing():
-    """Simulate a successful payment by direct DB write, then call status twice
-    to ensure subscription + rewards aren't double-applied."""
+    """Simulate a successful subscription payment, then call status twice to
+    ensure rewards aren't double-applied.
+
+    Under the current design, subscription *activation* (stripe_subscription_status,
+    current_period_end, etc.) is owned entirely by customer.subscription.created/
+    updated (server._sync_subscription_from_stripe), not by checkout completing -
+    so this simulates that webhook directly with a fake-but-shaped Stripe
+    Subscription object, the same way a real customer.subscription.created
+    event's data.object would look. Checkout completing
+    (server._process_successful_payment) is simulated separately and is only
+    responsible for the one-time signup bonus points now - that's the part
+    this test's idempotency check (call twice, points awarded once) is
+    actually about.
+    """
     # Create checkout
     r = requests.post(f"{BASE_URL}/api/payments/checkout",
                       json={"package_id": "yearly",
@@ -297,7 +323,6 @@ def test_idempotent_post_payment_processing():
     assert r.status_code == 200
     session_id = r.json()["session_id"]
 
-    # Reset rewards + subscription
     async def _setup():
         db = _db()
         await db.user_rewards.update_one(
@@ -305,36 +330,49 @@ def test_idempotent_post_payment_processing():
             {"$set": {"available_points": 0, "lifetime_points": 0}}, upsert=True)
         await db.users.update_one(
             {"user_id": USER_ID},
-            {"$unset": {"premium_status": "", "premium_plan": "",
-                        "premium_expires_at": "", "premium_started_at": ""}})
-        # Directly mark txn paid and invoke processor (simulating webhook)
-        from services import rewards_service
+            {"$unset": {"stripe_subscription_status": "", "premium_plan": "",
+                        "current_period_end": "", "premium_started_at": "",
+                        "stripe_subscription_id": "", "stripe_customer_id": "",
+                        "cancel_at_period_end": ""}})
+
+        # Simulate customer.subscription.created for this session's
+        # subscription - fake Stripe Subscription object shaped exactly like
+        # the real thing (including the two fields that moved in recent
+        # Stripe API versions: items.data[].current_period_end, not a
+        # top-level field).
+        from datetime import datetime, timezone, timedelta
+        current_period_end = datetime.now(timezone.utc) + timedelta(days=365)
+        fake_subscription = {
+            "id": "sub_test_idempotency",
+            "customer": "cus_test_idempotency",
+            "status": "active",
+            "cancel_at_period_end": False,
+            "metadata": {"user_id": USER_ID, "package_id": "yearly"},
+            "items": {"data": [{"current_period_end": int(current_period_end.timestamp())}]},
+        }
+        await server._sync_subscription_from_stripe(fake_subscription)
+
+        # Simulate checkout.session.completed (the transaction row + the
+        # idempotency guard both already exist for real from the checkout
+        # call above - just mark it paid and invoke the processor, same as
+        # the webhook handler does).
         txn = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
         assert txn is not None
         await db.payment_transactions.update_one(
             {"session_id": session_id},
             {"$set": {"payment_status": "paid", "status": "completed"}}
         )
-        # Apply post-payment logic via rewards_service directly
-        plan_days = 365
-        from datetime import datetime, timezone, timedelta
-        expires_at = datetime.now(timezone.utc) + timedelta(days=plan_days)
-        await db.users.update_one(
-            {"user_id": USER_ID},
-            {"$set": {"premium_status": "active", "premium_plan": "yearly",
-                      "premium_expires_at": expires_at.isoformat()}}
-        )
-        await rewards_service.award_points(
-            db, USER_ID, "premium_subscription", reference_id=session_id,
-            description="Premium yearly subscription bonus"
-        )
+        await server._process_successful_payment(txn)
     _run(_setup())
 
-    # Verify subscription is active
+    # Verify subscription is active, with the new field names
     r = requests.get(f"{BASE_URL}/api/subscription/status", headers=AUTH_HEADER)
     data = r.json()
     assert data["is_premium"] is True
     assert data["premium_plan"] == "yearly"
+    assert data["subscription_status"] == "active"
+    assert data["current_period_end"] is not None
+    assert data["cancel_at_period_end"] is False
 
     # Verify 1000 points awarded
     r = requests.get(f"{BASE_URL}/api/rewards", headers=AUTH_HEADER)

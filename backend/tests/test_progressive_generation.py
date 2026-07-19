@@ -59,7 +59,7 @@ def _setup_and_teardown():
             {"user_id": USER_ID},
             {"$set": {
                 "user_id": USER_ID, "email": f"{USER_ID}@example.com", "name": "Test",
-                "created_at": now.isoformat(), "premium_status": "inactive",
+                "created_at": now.isoformat(), "stripe_subscription_status": "inactive",
             }},
             upsert=True,
         )

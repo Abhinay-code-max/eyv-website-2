@@ -88,10 +88,15 @@ def _seed_session(user_id, session_token, premium=False):
         user_doc = {
             "user_id": user_id, "email": f"{user_id}@example.com", "name": "Test",
             "created_at": now.isoformat(),
-            "premium_status": "active" if premium else "inactive",
+            # is_user_premium() reads stripe_subscription_status/
+            # current_period_end (webhook-synced fields) now, not a
+            # standalone premium_status/premium_expires_at pair - faking
+            # "active" here still means faking what a real
+            # customer.subscription.updated sync would have written.
+            "stripe_subscription_status": "active" if premium else "inactive",
         }
         if premium:
-            user_doc["premium_expires_at"] = (now + timedelta(days=30)).isoformat()
+            user_doc["current_period_end"] = (now + timedelta(days=30)).isoformat()
         await db.users.update_one({"user_id": user_id}, {"$set": user_doc}, upsert=True)
         await db.user_sessions.update_one(
             {"session_token": session_token},

@@ -280,24 +280,41 @@ async def get_current_user(request: Request) -> User:
 
 
 async def is_user_premium(user_id: str) -> bool:
-    """Mirrors the active-and-not-expired check in GET /subscription/status,
-    minus that endpoint's side-effecting write-back of expired status (not
-    worth an extra write on every quota check - that endpoint already keeps
-    the stored status current whenever the user views it)."""
+    """Stripe is the source of truth; stripe_subscription_status/
+    current_period_end are a webhook-synced local cache read here so an
+    access check never has to make a live Stripe API call. Never writes -
+    these fields are only ever set from _sync_subscription_from_stripe
+    (customer.subscription.created/updated/deleted) or the invoice webhooks,
+    never guessed at from app-side date math.
+
+    "past_due" (Stripe's own Smart Retries mid-grace-period status) counts
+    as active - by the time a renewal invoice first fails, current_period_end
+    has typically already lapsed (that's *why* Stripe is retrying), so this
+    deliberately does NOT also require current_period_end >= now while
+    past_due, or the grace period would be a no-op. Access only actually
+    ends once a later customer.subscription.updated/deleted moves status to
+    something else (canceled/unpaid), driven entirely by Stripe's own retry
+    schedule and Dashboard-configured exhaustion action - no independent
+    grace-period timer of ours."""
     user_doc = await db.users.find_one(
         {'user_id': user_id},
-        {'_id': 0, 'premium_status': 1, 'premium_expires_at': 1}
+        {'_id': 0, 'stripe_subscription_status': 1, 'current_period_end': 1}
     )
-    if not user_doc or user_doc.get('premium_status') != 'active':
+    if not user_doc:
         return False
-    expires_at = user_doc.get('premium_expires_at')
-    if not expires_at:
+    status = user_doc.get('stripe_subscription_status')
+    if status == 'past_due':
         return True
-    if isinstance(expires_at, str):
-        expires_at = datetime.fromisoformat(expires_at)
-    if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
-    return expires_at >= datetime.now(timezone.utc)
+    if status != 'active':
+        return False
+    current_period_end = user_doc.get('current_period_end')
+    if not current_period_end:
+        return True
+    if isinstance(current_period_end, str):
+        current_period_end = datetime.fromisoformat(current_period_end)
+    if current_period_end.tzinfo is None:
+        current_period_end = current_period_end.replace(tzinfo=timezone.utc)
+    return current_period_end >= datetime.now(timezone.utc)
 
 # Auth Routes
 @api_router.get("/auth/google/login")
@@ -1945,9 +1962,15 @@ async def redeem_rewards(req: RedeemPointsRequest, request: Request):
 # app's live FX rate (services.ignav_service._to_inr) rather than a second
 # hardcoded INR number that would drift out of sync with the rate used
 # everywhere else. See _get_premium_plans().
+#
+# "interval" drives the recurring Checkout Session (mode='subscription',
+# price_data.recurring.interval) - confirmed against Stripe's current API
+# docs that price_data.recurring is valid for subscription-mode Checkout
+# Sessions, no pre-created Price object required, consistent with how
+# bookings already price everything via inline price_data.
 _PREMIUM_PLANS_USD = {
-    "monthly": {"name": "EYV Premium Monthly", "amount_usd": 9.99, "duration_days": 30},
-    "yearly": {"name": "EYV Premium Yearly", "amount_usd": 99.00, "duration_days": 365},
+    "monthly": {"name": "EYV Premium Monthly", "amount_usd": 9.99, "interval": "month"},
+    "yearly": {"name": "EYV Premium Yearly", "amount_usd": 99.00, "interval": "year"},
 }
 
 
@@ -1963,7 +1986,7 @@ async def _get_premium_plans() -> Dict[str, Dict[str, Any]]:
             "name": plan["name"],
             "amount": duffel_service._to_inr(plan["amount_usd"], "USD"),
             "currency": "inr",
-            "duration_days": plan["duration_days"],
+            "interval": plan["interval"],
         }
         for package_id, plan in _PREMIUM_PLANS_USD.items()
     }
@@ -2057,23 +2080,43 @@ async def create_checkout(req: CreateCheckoutRequest, request: Request):
     success_url = f"{origin}/payment-success?session_id={{CHECKOUT_SESSION_ID}}"
     cancel_url = f"{origin}/payment-cancel"
     
-    _ensure_stripe_configured()
-    session = await asyncio.to_thread(
-        stripe.checkout.Session.create,
-        mode='payment',
-        payment_method_types=['card'],
-        line_items=[{
-            'price_data': {
-                'currency': currency,
-                'product_data': {'name': description},
-                'unit_amount': int(round(amount * 100)),
-            },
-            'quantity': 1,
-        }],
+    price_data = {
+        'currency': currency,
+        'product_data': {'name': description},
+        'unit_amount': int(round(amount * 100)),
+    }
+
+    session_kwargs = dict(
+        line_items=[{'price_data': price_data, 'quantity': 1}],
         success_url=success_url,
         cancel_url=cancel_url,
         metadata=metadata,
     )
+
+    if payment_type == 'subscription':
+        # Real recurring billing (Problem 2 fix) - price_data.recurring is
+        # valid for subscription-mode Checkout Sessions per Stripe's current
+        # API (verified against docs.stripe.com/api/checkout/sessions/create
+        # rather than assumed), so this still needs no pre-created Stripe
+        # Price object, consistent with how bookings already price
+        # everything. payment_method_types is deliberately omitted (Stripe
+        # best practice for subscription Checkout - hardcoding ['card'] here
+        # would block other eligible payment methods Stripe could otherwise
+        # offer dynamically). subscription_data.metadata (not just the
+        # top-level metadata below) is required so the Subscription object
+        # Stripe creates carries user_id/package_id - customer.subscription.*
+        # and invoice.* webhook events reference that Subscription/Invoice,
+        # never this Checkout Session, so without this they'd have no way
+        # to resolve which user they belong to.
+        price_data['recurring'] = {'interval': plan['interval']}
+        session_kwargs['mode'] = 'subscription'
+        session_kwargs['subscription_data'] = {'metadata': metadata}
+    else:
+        session_kwargs['mode'] = 'payment'
+        session_kwargs['payment_method_types'] = ['card']
+
+    _ensure_stripe_configured()
+    session = await asyncio.to_thread(stripe.checkout.Session.create, **session_kwargs)
 
     # Store transaction
     transaction = {
@@ -2160,26 +2203,24 @@ async def _process_successful_payment(transaction: Dict):
     user_id = metadata.get('user_id') or transaction.get('user_id')
     
     if payment_type == 'subscription':
+        # checkout.session.completed for a subscription-mode Checkout
+        # Session only ever fires once Stripe has actually collected the
+        # first payment (unlike the raw Subscription API, hosted Checkout
+        # doesn't complete on an unpaid/incomplete subscription) - so it's
+        # safe to award the one-time signup bonus here. Everything about
+        # the subscription's *ongoing* state (status, current_period_end,
+        # stripe_subscription_id/customer_id) is owned entirely by
+        # customer.subscription.created/updated (_sync_subscription_from_stripe)
+        # instead of being set here - this event doesn't carry the
+        # subscription object at all, and per the state-tracking design,
+        # local fields are only ever written from the webhook that is
+        # actually authoritative for them.
         package_id = metadata.get('package_id')
-        premium_plans = await _get_premium_plans()
-        plan = premium_plans.get(package_id)
-        if plan:
-            expires_at = datetime.now(timezone.utc) + timedelta(days=plan['duration_days'])
-            await db.users.update_one(
-                {'user_id': user_id},
-                {'$set': {
-                    'premium_status': 'active',
-                    'premium_plan': package_id,
-                    'premium_expires_at': expires_at.isoformat(),
-                    'premium_started_at': datetime.now(timezone.utc).isoformat(),
-                }}
-            )
-            # Award premium signup bonus points
-            await rewards_service.award_points(
-                db, user_id, 'premium_subscription',
-                reference_id=transaction['session_id'],
-                description=f"Premium {package_id} subscription bonus"
-            )
+        await rewards_service.award_points(
+            db, user_id, 'premium_subscription',
+            reference_id=transaction['session_id'],
+            description=f"Premium {package_id} subscription bonus"
+        )
     
     elif payment_type == 'booking':
         booking_id = metadata.get('booking_id')
@@ -2252,6 +2293,78 @@ async def _process_expired_payment(transaction: Dict):
     )
 
 
+async def _sync_subscription_from_stripe(subscription_obj: Dict):
+    """Sync local subscription-state fields from a Stripe Subscription
+    object - shared by customer.subscription.created/updated/deleted, since
+    a .deleted event's object is itself just a subscription with
+    status="canceled" (there's nothing event-specific to branch on; this is
+    the one place that ever writes these fields, matching the rest of this
+    app's rule that local state is always downstream of Stripe, never
+    guessed at). A bare overwrite of the current Stripe-reported values is
+    inherently idempotent - unlike the checkout success/expiry paths there
+    are no side effects here (no points awarded, nothing granted) that a
+    duplicate delivery could double-apply, so no extra "already processed"
+    guard is needed.
+
+    current_period_end lives on the subscription's line item, not the
+    subscription itself, as of recent Stripe API versions (verified against
+    docs.stripe.com/api/subscriptions/object rather than assumed) - reading
+    the old top-level field would have silently returned nothing.
+    """
+    user_id = (subscription_obj.get('metadata') or {}).get('user_id')
+    if not user_id:
+        logger.warning(
+            f"customer.subscription event for {subscription_obj.get('id')} "
+            "has no user_id in metadata - cannot sync, skipping"
+        )
+        return
+
+    update = {
+        'stripe_customer_id': subscription_obj.get('customer'),
+        'stripe_subscription_id': subscription_obj.get('id'),
+        'stripe_subscription_status': subscription_obj.get('status'),
+        'cancel_at_period_end': bool(subscription_obj.get('cancel_at_period_end')),
+    }
+    package_id = (subscription_obj.get('metadata') or {}).get('package_id')
+    if package_id:
+        update['premium_plan'] = package_id
+
+    items = (subscription_obj.get('items') or {}).get('data') or []
+    if items and items[0].get('current_period_end'):
+        update['current_period_end'] = datetime.fromtimestamp(
+            items[0]['current_period_end'], tz=timezone.utc
+        ).isoformat()
+
+    # Set once, the first time this subscription is ever observed active -
+    # not overwritten on every sync, so a later past_due/active flap on
+    # renewal doesn't reset "member since".
+    if subscription_obj.get('status') == 'active':
+        existing = await db.users.find_one({'user_id': user_id}, {'_id': 0, 'premium_started_at': 1})
+        if not existing or not existing.get('premium_started_at'):
+            update['premium_started_at'] = datetime.now(timezone.utc).isoformat()
+
+    await db.users.update_one({'user_id': user_id}, {'$set': update})
+
+
+def _resolve_invoice_subscription(invoice_obj: Dict) -> tuple:
+    """Returns (user_id, subscription_id) for an invoice.paid/payment_failed
+    event. parent.subscription_details is where both the subscription
+    reference AND its metadata live as of recent Stripe API versions
+    (verified against docs.stripe.com/api/invoices/object - the old flat
+    invoice.subscription field is gone). Metadata is preferred when present
+    (avoids a DB lookup race against customer.subscription.created for the
+    very first invoice on a brand-new subscription); falling back to a
+    stripe_subscription_id match covers subscriptions old enough to predate
+    Stripe populating this metadata (documented as only present from
+    2023-06-29 onward), which isn't a real concern for this app but is a
+    one-line safety net.
+    """
+    sub_details = (invoice_obj.get('parent') or {}).get('subscription_details') or {}
+    subscription_id = sub_details.get('subscription')
+    user_id = (sub_details.get('metadata') or {}).get('user_id')
+    return user_id, subscription_id
+
+
 @api_router.post("/webhook/stripe")
 async def stripe_webhook(request: Request):
     """Handle Stripe webhook events."""
@@ -2299,6 +2412,42 @@ async def stripe_webhook(request: Request):
                 )
                 await _process_expired_payment(transaction)
 
+        elif event['type'] in (
+            'customer.subscription.created',
+            'customer.subscription.updated',
+            'customer.subscription.deleted',
+        ):
+            await _sync_subscription_from_stripe(event['data']['object'])
+
+        elif event['type'] == 'invoice.paid':
+            invoice_obj = event['data']['object']
+            user_id, subscription_id = _resolve_invoice_subscription(invoice_obj)
+            filter_query = {'user_id': user_id} if user_id else (
+                {'stripe_subscription_id': subscription_id} if subscription_id else None
+            )
+            if filter_query:
+                # Confirms a successful (renewal or initial) charge - status
+                # reflects active/current again even if a previous cycle's
+                # invoice.payment_failed had marked this past_due.
+                await db.users.update_one(filter_query, {'$set': {'stripe_subscription_status': 'active'}})
+
+        elif event['type'] == 'invoice.payment_failed':
+            invoice_obj = event['data']['object']
+            user_id, subscription_id = _resolve_invoice_subscription(invoice_obj)
+            filter_query = {'user_id': user_id} if user_id else (
+                {'stripe_subscription_id': subscription_id} if subscription_id else None
+            )
+            if filter_query:
+                # Grace period starts here - access stays on (is_user_premium
+                # treats past_due as active) for as long as Stripe's own
+                # Smart Retries keep retrying (~2 weeks by default). No
+                # custom timer: whatever Stripe/the Dashboard's configured
+                # exhaustion action eventually does (cancel / mark unpaid /
+                # leave past_due) arrives as its own
+                # customer.subscription.updated/deleted event and is synced
+                # by _sync_subscription_from_stripe like any other change.
+                await db.users.update_one(filter_query, {'$set': {'stripe_subscription_status': 'past_due'}})
+
         return {"received": True}
     except HTTPException:
         raise
@@ -2328,30 +2477,26 @@ async def get_subscription_status(request: Request):
     user = await get_current_user(request)
     user_doc = await db.users.find_one(
         {'user_id': user.user_id},
-        {'_id': 0, 'premium_status': 1, 'premium_plan': 1, 'premium_expires_at': 1, 'premium_started_at': 1}
+        {
+            '_id': 0, 'stripe_subscription_status': 1, 'premium_plan': 1,
+            'current_period_end': 1, 'premium_started_at': 1, 'cancel_at_period_end': 1,
+        }
     )
-    
-    premium_status = user_doc.get('premium_status', 'inactive') if user_doc else 'inactive'
-    
-    # Check expiry
-    if premium_status == 'active' and user_doc.get('premium_expires_at'):
-        expires_at = user_doc['premium_expires_at']
-        if isinstance(expires_at, str):
-            expires_at = datetime.fromisoformat(expires_at)
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
-        if expires_at < datetime.now(timezone.utc):
-            premium_status = 'expired'
-            await db.users.update_one(
-                {'user_id': user.user_id},
-                {'$set': {'premium_status': 'expired'}}
-            )
-    
+
+    # Pure read - no write-back here. Under the old design this endpoint
+    # self-healed a stale "active" status by computing expiry itself and
+    # writing "expired" back on read; that's exactly the app-guessing-at-
+    # expiry pattern this rebuild replaces. stripe_subscription_status is
+    # only ever current because a webhook (_sync_subscription_from_stripe /
+    # invoice.paid / invoice.payment_failed) keeps it that way - reusing
+    # is_user_premium() here rather than re-deriving similar-but-different
+    # logic keeps there being exactly one definition of "has access".
     return {
-        'is_premium': premium_status == 'active',
-        'premium_status': premium_status,
+        'is_premium': await is_user_premium(user.user_id),
+        'subscription_status': user_doc.get('stripe_subscription_status') if user_doc else None,
         'premium_plan': user_doc.get('premium_plan') if user_doc else None,
-        'premium_expires_at': user_doc.get('premium_expires_at') if user_doc else None,
+        'current_period_end': user_doc.get('current_period_end') if user_doc else None,
+        'cancel_at_period_end': bool(user_doc.get('cancel_at_period_end')) if user_doc else False,
         'available_plans': await _get_premium_plans(),
     }
 
