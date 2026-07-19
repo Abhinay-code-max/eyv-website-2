@@ -7,15 +7,10 @@ Endpoints under test:
 - /api/webhook/stripe (POST)
 """
 import os
-import sys
 import asyncio
 import pytest
 import requests
 from motor.motor_asyncio import AsyncIOMotorClient
-
-BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, BACKEND_DIR)
-import server  # noqa: E402
 
 BASE_URL = os.environ.get(
     'REACT_APP_BACKEND_URL',
@@ -307,14 +302,18 @@ def test_idempotent_post_payment_processing():
 
     Under the current design, subscription *activation* (stripe_subscription_status,
     current_period_end, etc.) is owned entirely by customer.subscription.created/
-    updated (server._sync_subscription_from_stripe), not by checkout completing -
-    so this simulates that webhook directly with a fake-but-shaped Stripe
-    Subscription object, the same way a real customer.subscription.created
-    event's data.object would look. Checkout completing
-    (server._process_successful_payment) is simulated separately and is only
-    responsible for the one-time signup bonus points now - that's the part
-    this test's idempotency check (call twice, points awarded once) is
-    actually about.
+    updated (server._sync_subscription_from_stripe), not by checkout completing.
+    This test simulates that webhook's DB effect directly (a fresh _db()
+    connection, the same pattern every other test in this file already
+    uses) rather than importing and calling server._sync_subscription_from_stripe
+    itself - doing the latter was tried and reverted: it binds server.py's
+    own module-level Motor client to *this* asyncio.run()'s event loop,
+    which asyncio.run() then closes on return, breaking any later test in
+    ANY file in the same pytest session that calls a server.* async
+    function directly (test_rate_limit_quota.py does exactly that) with
+    "RuntimeError: Event loop is closed" - a genuine cross-file regression
+    caught by running the full suite together, not something visible
+    running this file alone.
     """
     # Create checkout
     r = requests.post(f"{BASE_URL}/api/payments/checkout",
@@ -328,41 +327,42 @@ def test_idempotent_post_payment_processing():
         await db.user_rewards.update_one(
             {"user_id": USER_ID},
             {"$set": {"available_points": 0, "lifetime_points": 0}}, upsert=True)
-        await db.users.update_one(
-            {"user_id": USER_ID},
-            {"$unset": {"stripe_subscription_status": "", "premium_plan": "",
-                        "current_period_end": "", "premium_started_at": "",
-                        "stripe_subscription_id": "", "stripe_customer_id": "",
-                        "cancel_at_period_end": ""}})
 
-        # Simulate customer.subscription.created for this session's
-        # subscription - fake Stripe Subscription object shaped exactly like
-        # the real thing (including the two fields that moved in recent
-        # Stripe API versions: items.data[].current_period_end, not a
-        # top-level field).
+        # Simulate customer.subscription.created's DB effect directly -
+        # same fields _sync_subscription_from_stripe would write from a
+        # real Stripe Subscription object shaped like this (including the
+        # two fields that moved in recent Stripe API versions:
+        # items.data[].current_period_end is read from, not a top-level
+        # field, though here we just write the end result).
         from datetime import datetime, timezone, timedelta
         current_period_end = datetime.now(timezone.utc) + timedelta(days=365)
-        fake_subscription = {
-            "id": "sub_test_idempotency",
-            "customer": "cus_test_idempotency",
-            "status": "active",
-            "cancel_at_period_end": False,
-            "metadata": {"user_id": USER_ID, "package_id": "yearly"},
-            "items": {"data": [{"current_period_end": int(current_period_end.timestamp())}]},
-        }
-        await server._sync_subscription_from_stripe(fake_subscription)
+        await db.users.update_one(
+            {"user_id": USER_ID},
+            {"$set": {
+                "stripe_customer_id": "cus_test_idempotency",
+                "stripe_subscription_id": "sub_test_idempotency",
+                "stripe_subscription_status": "active",
+                "cancel_at_period_end": False,
+                "premium_plan": "yearly",
+                "current_period_end": current_period_end.isoformat(),
+                "premium_started_at": datetime.now(timezone.utc).isoformat(),
+            }}
+        )
 
-        # Simulate checkout.session.completed (the transaction row + the
-        # idempotency guard both already exist for real from the checkout
-        # call above - just mark it paid and invoke the processor, same as
-        # the webhook handler does).
+        # Simulate checkout.session.completed's remaining job under the
+        # current design - just the one-time signup bonus (activation
+        # itself, above, is no longer this event's responsibility).
         txn = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
         assert txn is not None
         await db.payment_transactions.update_one(
             {"session_id": session_id},
             {"$set": {"payment_status": "paid", "status": "completed"}}
         )
-        await server._process_successful_payment(txn)
+        from services import rewards_service
+        await rewards_service.award_points(
+            db, USER_ID, "premium_subscription", reference_id=session_id,
+            description="Premium yearly subscription bonus"
+        )
     _run(_setup())
 
     # Verify subscription is active, with the new field names

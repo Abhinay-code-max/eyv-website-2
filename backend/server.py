@@ -2472,33 +2472,102 @@ async def get_admin_usage_summary(x_admin_key: Optional[str] = Header(default=No
 
 # ==================== Premium Subscription Status ====================
 
-@api_router.get("/subscription/status")
-async def get_subscription_status(request: Request):
-    user = await get_current_user(request)
+async def _subscription_status_payload(user_id: str) -> Dict[str, Any]:
+    """Shared response shape for GET /subscription/status and the cancel/
+    resume endpoints below - one definition of what "subscription status"
+    means to a client, rather than three near-identical hand-rolled dicts.
+    Pure read, no write-back - see the note on the GET endpoint for why."""
     user_doc = await db.users.find_one(
-        {'user_id': user.user_id},
+        {'user_id': user_id},
         {
             '_id': 0, 'stripe_subscription_status': 1, 'premium_plan': 1,
             'current_period_end': 1, 'premium_started_at': 1, 'cancel_at_period_end': 1,
         }
     )
-
-    # Pure read - no write-back here. Under the old design this endpoint
-    # self-healed a stale "active" status by computing expiry itself and
-    # writing "expired" back on read; that's exactly the app-guessing-at-
-    # expiry pattern this rebuild replaces. stripe_subscription_status is
-    # only ever current because a webhook (_sync_subscription_from_stripe /
-    # invoice.paid / invoice.payment_failed) keeps it that way - reusing
-    # is_user_premium() here rather than re-deriving similar-but-different
-    # logic keeps there being exactly one definition of "has access".
     return {
-        'is_premium': await is_user_premium(user.user_id),
+        'is_premium': await is_user_premium(user_id),
         'subscription_status': user_doc.get('stripe_subscription_status') if user_doc else None,
         'premium_plan': user_doc.get('premium_plan') if user_doc else None,
         'current_period_end': user_doc.get('current_period_end') if user_doc else None,
         'cancel_at_period_end': bool(user_doc.get('cancel_at_period_end')) if user_doc else False,
         'available_plans': await _get_premium_plans(),
     }
+
+
+@api_router.get("/subscription/status")
+async def get_subscription_status(request: Request):
+    user = await get_current_user(request)
+    # Pure read - no write-back here. Under the old design this endpoint
+    # self-healed a stale "active" status by computing expiry itself and
+    # writing "expired" back on read; that's exactly the app-guessing-at-
+    # expiry pattern this rebuild replaces. stripe_subscription_status is
+    # only ever current because a webhook (_sync_subscription_from_stripe /
+    # invoice.paid / invoice.payment_failed) keeps it that way.
+    return await _subscription_status_payload(user.user_id)
+
+
+@api_router.post("/subscription/cancel")
+async def cancel_subscription(request: Request):
+    """Cancel-at-period-end, not an immediate cancel - the user keeps
+    access through the period they already paid for (product decision).
+    Stripe's synchronous response from Subscription.modify is fed straight
+    into _sync_subscription_from_stripe (the same function
+    customer.subscription.updated uses) so the local cancel_at_period_end
+    flag is correct immediately, without waiting on that webhook's round
+    trip - it still arrives moments later and just re-syncs the same
+    values, harmlessly, since that function is idempotent by construction.
+    _sync_subscription_from_stripe stays the only place these fields are
+    ever written, whether triggered by a webhook or (as here) directly by
+    the user's own request."""
+    user = await get_current_user(request)
+    user_doc = await db.users.find_one(
+        {'user_id': user.user_id},
+        {'_id': 0, 'stripe_subscription_id': 1, 'stripe_subscription_status': 1}
+    )
+    if not user_doc or not user_doc.get('stripe_subscription_id'):
+        raise HTTPException(status_code=400, detail="No subscription to cancel")
+    if user_doc.get('stripe_subscription_status') not in ('active', 'past_due'):
+        raise HTTPException(status_code=400, detail="No active subscription to cancel")
+
+    _ensure_stripe_configured()
+    subscription = await asyncio.to_thread(
+        stripe.Subscription.modify,
+        user_doc['stripe_subscription_id'],
+        cancel_at_period_end=True,
+    )
+    await _sync_subscription_from_stripe(subscription)
+    return await _subscription_status_payload(user.user_id)
+
+
+@api_router.post("/subscription/resume")
+async def resume_subscription(request: Request):
+    """Undo a pending cancel-at-period-end before the period actually ends
+    - standard SaaS UX (a user who clicked cancel and changed their mind
+    shouldn't have to resubscribe from scratch through checkout again).
+    Only meaningful while cancel_at_period_end is still true and the
+    subscription hasn't actually ended yet; once customer.subscription.deleted
+    has fired there's nothing left to resume and the user needs a new
+    checkout instead."""
+    user = await get_current_user(request)
+    user_doc = await db.users.find_one(
+        {'user_id': user.user_id},
+        {'_id': 0, 'stripe_subscription_id': 1, 'stripe_subscription_status': 1, 'cancel_at_period_end': 1}
+    )
+    if not user_doc or not user_doc.get('stripe_subscription_id'):
+        raise HTTPException(status_code=400, detail="No subscription to resume")
+    if user_doc.get('stripe_subscription_status') not in ('active', 'past_due'):
+        raise HTTPException(status_code=400, detail="Subscription has already ended - start a new one instead")
+    if not user_doc.get('cancel_at_period_end'):
+        raise HTTPException(status_code=400, detail="Subscription is not scheduled to cancel")
+
+    _ensure_stripe_configured()
+    subscription = await asyncio.to_thread(
+        stripe.Subscription.modify,
+        user_doc['stripe_subscription_id'],
+        cancel_at_period_end=False,
+    )
+    await _sync_subscription_from_stripe(subscription)
+    return await _subscription_status_payload(user.user_id)
 
 
 # Stale-pending-booking sweep - a safety net for missed/undelivered
