@@ -142,6 +142,22 @@ const SortBar = ({ sort, setSort, filter, setFilter, options }) => (
   </div>
 );
 
+/* ── Booking status display ───────────────────────────────────────────────
+   A booking's `status` is the whole story now (pending_payment ->
+   confirmed, or -> payment_failed on a declined/abandoned/expired
+   checkout - see backend server.py). The raw `payment_status` field
+   (mock_paid/paid) is an internal implementation detail, not something to
+   surface to the user as its own badge - it duplicates/contradicts
+   `status` in exactly the cases that used to confuse users here. */
+const BOOKING_STATUS_DISPLAY = {
+  confirmed: { label: 'Confirmed', className: 'bg-green-100 text-green-700' },
+  pending_payment: { label: 'Awaiting payment', className: 'bg-amber-100 text-amber-700' },
+  payment_failed: { label: 'Payment not completed', className: 'bg-red-100 text-red-700' },
+  cancelled: { label: 'Cancelled', className: 'bg-[#E7E5E4] text-[#57534E]' },
+};
+const bookingStatusDisplay = (status) =>
+  BOOKING_STATUS_DISPLAY[status] || { label: status, className: 'bg-[#E7E5E4] text-[#57534E]' };
+
 /* ── Page ──────────────────────────────────────────────────────────────── */
 const VALID_TABS = ['flights', 'hotels', 'bookings'];
 
@@ -204,6 +220,8 @@ const BookingPage = ({ user }) => {
     finally { setLoading(false); }
   };
 
+  const [payingBookingId, setPayingBookingId] = useState(null);
+
   const handleBookItem = (item, type) => { setSelectedItem({ item, type }); setShowBookingModal(true); };
 
   const confirmBooking = async () => {
@@ -221,6 +239,23 @@ const BookingPage = ({ user }) => {
       if (cr.data.url) { window.location.href = cr.data.url; }
       else { setBookingSuccess(br.data); setShowBookingModal(false); fetchBookings(); }
     } catch (e) { console.error(e); alert('Booking failed. Please try again.'); }
+  };
+
+  /* ── Resume payment on a booking still awaiting it (same checkout call
+     confirmBooking already makes, just for an existing booking_id) ── */
+  const payForBooking = async (bookingId) => {
+    setPayingBookingId(bookingId);
+    try {
+      const cr = await axios.post(`${API_URL}/payments/checkout`,
+        { booking_id: bookingId, origin_url: window.location.origin },
+        { withCredentials: true }
+      );
+      if (cr.data.url) { window.location.href = cr.data.url; }
+    } catch (e) {
+      console.error(e);
+      alert('Could not start payment. Please try again.');
+      setPayingBookingId(null);
+    }
   };
 
   /* ── Sorted/filtered flight list ── */
@@ -650,12 +685,14 @@ const BookingPage = ({ user }) => {
                               Confirmation: <span className="font-mono font-medium text-[#1C1917]">{booking.confirmation_code}</span>
                             </p>
                             <div className="flex gap-2 mt-2">
-                              <span className={`text-xs px-2.5 py-1 rounded-full font-medium ${
-                                booking.status === 'confirmed' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
-                              }`}>{booking.status}</span>
-                              <span className="text-xs px-2.5 py-1 rounded-full bg-blue-100 text-blue-700 font-medium">
-                                {booking.payment_status}
-                              </span>
+                              {(() => {
+                                const { label, className } = bookingStatusDisplay(booking.status);
+                                return (
+                                  <span className={`text-xs px-2.5 py-1 rounded-full font-medium ${className}`}>
+                                    {label}
+                                  </span>
+                                );
+                              })()}
                             </div>
                           </div>
                         </div>
@@ -666,6 +703,14 @@ const BookingPage = ({ user }) => {
                           <div className="flex items-center gap-1 text-xs text-[#57534E] mt-1 justify-end">
                             <Clock size={11} />{new Date(booking.created_at).toLocaleDateString()}
                           </div>
+                          {booking.status === 'pending_payment' && (
+                            <Button
+                              onClick={() => payForBooking(booking.booking_id)}
+                              disabled={payingBookingId === booking.booking_id}
+                              className="mt-2 bg-[#C47245] hover:bg-[#A85D38] rounded-xl text-xs h-8 px-3">
+                              {payingBookingId === booking.booking_id ? 'Redirecting…' : 'Complete payment'}
+                            </Button>
+                          )}
                         </div>
                       </div>
                     </motion.div>
