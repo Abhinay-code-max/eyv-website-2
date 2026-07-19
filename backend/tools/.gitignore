@@ -1,0 +1,3 @@
+# Vendored Stripe CLI binary - downloaded per-dev, see README's
+# "Local Stripe webhook testing" section. Not committed (large binary).
+stripe-cli/
