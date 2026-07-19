@@ -1766,6 +1766,141 @@ async def create_booking(req: BookingRequest, request: Request):
     return booking_doc
 
 
+def _bookable_line_items(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Identify the real, reservable items in a generated plan tier - flights
+    and hotels only, for a "Book this Plan" bundle. Activities/meals/
+    shopping are never included: nothing in the AI-authored itinerary
+    carries a provider/booking reference, so there's no reliable "bookable"
+    signal for them at all (this isn't a heuristic that might miss some -
+    none of them are ever bookable, by construction).
+
+    Bookability is judged from anchor_pricing (the real Duffel/Ignav +
+    SerpApi fetch done at generation time - see _fetch_anchor_pricing):
+      - flight: anchor_pricing.flight_price > 0 AND not is_train. Trains
+        have no real inventory anywhere in this app (POST /search/trains
+        always returns empty; a train plan's anchor price is a hardcoded
+        placeholder table, not a provider quote - see
+        train_placeholder_pricing) - "type": "train" is deliberately never
+        produced here, though the field is a free string so it could be
+        added later without a schema change if that ever becomes real.
+      - hotel: anchor_pricing.hotel_price_per_night > 0. In both cases, 0
+        means the real fetch failed and the AI was told to invent a
+        placeholder number instead - not tied to any real fare/rate, so
+        not bookable.
+
+    The charged PRICE per item comes from cost_breakdown, not from
+    anchor_pricing's raw fields - cost_breakdown.transportation/
+    accommodation are the plan's own already-computed, already-displayed
+    per-category totals (summed across every day's forced-to-anchor
+    transportation/accommodation cost), so this always matches exactly
+    what the user already saw on screen rather than re-deriving the same
+    per-leg/per-night scaling independently and risking drift.
+    """
+    anchor = plan.get('anchor_pricing') or {}
+    cost_breakdown = plan.get('cost_breakdown') or {}
+    line_items = []
+
+    if not anchor.get('is_train') and anchor.get('flight_price', 0) > 0:
+        transport_price = cost_breakdown.get('transportation', 0)
+        if transport_price > 0:
+            line_items.append({
+                'type': 'flight',
+                'price': transport_price,
+                'details': {
+                    'airline': anchor.get('flight_airline', ''),
+                    'flight_number': anchor.get('flight_number', ''),
+                    'departure_time': anchor.get('flight_dep_time', ''),
+                    'arrival_time': anchor.get('flight_arr_time', ''),
+                    'duration': anchor.get('flight_duration', ''),
+                    'stops': anchor.get('flight_stops', 0),
+                },
+            })
+
+    if anchor.get('hotel_price_per_night', 0) > 0:
+        hotel_price = cost_breakdown.get('accommodation', 0)
+        if hotel_price > 0:
+            line_items.append({
+                'type': 'hotel',
+                'price': hotel_price,
+                'details': {
+                    'name': anchor.get('hotel_name', ''),
+                    'stars': anchor.get('hotel_stars', 0),
+                },
+            })
+
+    return line_items
+
+
+@api_router.post("/trips/{trip_id}/book/{plan_type}")
+async def book_trip_plan(trip_id: str, plan_type: str, request: Request):
+    """Create ONE bundled booking covering every real bookable item (flight +
+    hotel) in a generated plan tier, for a single combined Stripe charge -
+    "Book this Plan". Mirrors create_booking's state machine exactly:
+    status="pending_payment" at creation (never "confirmed" - the same bug
+    class Problem 1 fixed for single-item bookings), promoted only by a
+    real payment via the existing, unmodified webhook/polling/scheduler
+    machinery below, which operates generically on booking_id/status and
+    doesn't care whether a booking has one item_data object or a
+    line_items array.
+    """
+    user = await get_current_user(request)
+
+    if plan_type not in TRIP_PLAN_TYPES:
+        raise HTTPException(status_code=400, detail=f"plan_type must be one of {list(TRIP_PLAN_TYPES)}")
+
+    # Scoping to user_id doubles as the ownership check, same pattern as
+    # regenerate_trip_plan - a trip_id that doesn't exist and one owned by
+    # someone else both 404 identically.
+    trip = await db.trips.find_one(
+        {"trip_id": trip_id, "user_id": user.user_id},
+        {"_id": 0}
+    )
+    if not trip:
+        raise HTTPException(status_code=404, detail="Trip not found")
+
+    plans = trip.get("plans", [])
+    plan = next((p for p in plans if p.get("plan_type") == plan_type), None)
+    if not plan:
+        raise HTTPException(status_code=404, detail=f"No {plan_type} plan found on this trip")
+    if plan.get("status") != "ready":
+        raise HTTPException(status_code=400, detail=f"{plan_type} plan is not ready to book")
+
+    line_items = _bookable_line_items(plan)
+    if not line_items:
+        raise HTTPException(status_code=400, detail="Nothing in this plan is currently bookable")
+
+    total_amount = sum(item['price'] for item in line_items)
+    preferences = trip.get('preferences', {})
+
+    booking_id = f"BK{uuid.uuid4().hex[:10].upper()}"
+    confirmation_code = f"EYV-{uuid.uuid4().hex[:8].upper()}"
+
+    booking_doc = {
+        "booking_id": booking_id,
+        "confirmation_code": confirmation_code,
+        "user_id": user.user_id,
+        "trip_id": trip_id,
+        "booking_type": "bundle",
+        "plan_type": plan_type,
+        "trip_summary": {
+            "destination": preferences.get("destination"),
+            "departure_date": preferences.get("departure_date"),
+            "return_date": preferences.get("return_date"),
+        },
+        "line_items": line_items,
+        "traveler_details": {},
+        "status": "pending_payment",
+        "payment_status": "mock_paid",
+        "total_amount": total_amount,
+        "currency": plan.get('currency', 'INR'),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    await db.bookings.insert_one(booking_doc)
+    booking_doc.pop("_id", None)
+    return booking_doc
+
+
 @api_router.get("/bookings")
 async def list_bookings(request: Request):
     user = await get_current_user(request)
