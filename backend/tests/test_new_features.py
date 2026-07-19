@@ -119,7 +119,11 @@ def test_booking_lifecycle():
     assert "booking_id" in booking
     assert "confirmation_code" in booking
     assert booking["confirmation_code"].startswith("EYV-")
-    assert booking["status"] == "confirmed"
+    # A booking starts "pending_payment", not "confirmed" - no Stripe
+    # checkout has happened yet at creation time. It's only promoted to
+    # "confirmed" by a real successful payment (see
+    # _process_successful_payment in server.py).
+    assert booking["status"] == "pending_payment"
     assert booking["payment_status"] == "mock_paid"
     # Price is resolved server-side from the cached search result, never from the request
     assert booking["total_amount"] == expected_price

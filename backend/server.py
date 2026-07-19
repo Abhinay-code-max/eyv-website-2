@@ -1730,7 +1730,12 @@ async def create_booking(req: BookingRequest, request: Request):
         "booking_type": req.booking_type,
         "item_data": req.item_data,
         "traveler_details": req.traveler_details or {},
-        "status": "confirmed",
+        # Not "confirmed" - no Stripe checkout has even started yet at this
+        # point. Only _process_successful_payment (on a real
+        # checkout.session.completed / polling-confirmed payment) ever
+        # promotes this to "confirmed" - see that function and
+        # _process_expired_payment for the rest of the state machine.
+        "status": "pending_payment",
         "payment_status": "mock_paid",
         "total_amount": resolved["price"],
         "currency": resolved["currency"],
@@ -2135,6 +2140,7 @@ async def get_payment_status(session_id: str, request: Request):
             {'session_id': session_id},
             {'$set': {'payment_status': 'expired', 'status': 'expired'}}
         )
+        await _process_expired_payment(transaction)
     
     return {
         'payment_status': status_response.payment_status,
@@ -2177,12 +2183,24 @@ async def _process_successful_payment(transaction: Dict):
         booking_id = metadata.get('booking_id')
         points_used = int(metadata.get('points_used', 0))
         
-        # Mark booking as paid
+        # Mark booking as paid AND confirmed. Deliberately unconditional on
+        # the booking's current status (filtered only by booking_id) - a
+        # genuinely successful payment must always win, even if this fires
+        # after _process_expired_payment already flipped the same booking to
+        # "payment_failed" (e.g. the user's Stripe Checkout tab was still
+        # open and they completed payment within Stripe's 24h session
+        # window, well after our own much shorter stale-pending TTL gave up
+        # on it - see the scheduler in services/booking_expiry_service.py).
+        # Money received must never be overridden by a stale-cleanup job.
         booking = await db.bookings.find_one({'booking_id': booking_id}, {'_id': 0})
         if booking:
             await db.bookings.update_one(
                 {'booking_id': booking_id},
-                {'$set': {'payment_status': 'paid', 'paid_at': datetime.now(timezone.utc).isoformat()}}
+                {'$set': {
+                    'status': 'confirmed',
+                    'payment_status': 'paid',
+                    'paid_at': datetime.now(timezone.utc).isoformat(),
+                }}
             )
             
             # Redeem points if used
@@ -2199,6 +2217,37 @@ async def _process_successful_payment(transaction: Dict):
                 reference_id=booking_id,
                 description=f"Earned for {booking.get('booking_type')} booking"
             )
+
+
+async def _process_expired_payment(transaction: Dict):
+    """Process an abandoned/declined checkout whose Stripe session expired
+    without completing. Mirrors _process_successful_payment's dispatch
+    shape, but only ever moves a booking OUT of "pending_payment" - the
+    update filter includes status: "pending_payment" so it can never
+    clobber a booking _process_successful_payment already confirmed (that
+    write is unconditional and always wins - see the comment there). Called
+    from both the checkout.session.expired webhook and the polling
+    /payments/status path, same as the success side.
+
+    No-op for premium/subscription checkouts - Problem 2 (real
+    subscriptions) is a separate, later effort, and premium access is only
+    ever granted on success, never provisionally, so there's no pending
+    state to roll back here."""
+    metadata = transaction.get('metadata', {})
+    if metadata.get('payment_type') != 'booking':
+        return
+
+    booking_id = metadata.get('booking_id')
+    if not booking_id:
+        return
+
+    await db.bookings.update_one(
+        {'booking_id': booking_id, 'status': 'pending_payment'},
+        {'$set': {
+            'status': 'payment_failed',
+            'payment_failed_at': datetime.now(timezone.utc).isoformat(),
+        }}
+    )
 
 
 @api_router.post("/webhook/stripe")
@@ -2230,6 +2279,23 @@ async def stripe_webhook(request: Request):
                     }}
                 )
                 await _process_successful_payment(transaction)
+
+        elif event['type'] == 'checkout.session.expired':
+            session_obj = event['data']['object']
+            transaction = await db.payment_transactions.find_one(
+                {'session_id': session_obj['id']},
+                {'_id': 0}
+            )
+            # Guards against reprocessing on Stripe's at-least-once webhook
+            # redelivery, and against a stray/duplicate expired event ever
+            # touching a transaction a (possibly since-arrived) success
+            # event already marked paid.
+            if transaction and transaction['payment_status'] not in ('paid', 'expired'):
+                await db.payment_transactions.update_one(
+                    {'session_id': session_obj['id']},
+                    {'$set': {'payment_status': 'expired', 'status': 'expired'}}
+                )
+                await _process_expired_payment(transaction)
 
         return {"received": True}
     except HTTPException:
