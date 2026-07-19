@@ -29,6 +29,7 @@ export const TRIP_PLANNER = {
   premiumCard: 'premium-plan-card',
   luxuryCard: 'luxury-plan-card',
   quotaBanner: 'trip-quota-banner',
+  bookPlanButton: 'book-plan-button',
 };
 
 export const DASHBOARD = {

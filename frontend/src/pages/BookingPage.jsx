@@ -672,14 +672,20 @@ const BookingPage = ({ user }) => {
                       <div className="flex items-start justify-between">
                         <div className="flex items-start gap-4">
                           <div className="bg-[#C47245]/10 p-3 rounded-xl">
-                            {booking.booking_type === 'flight'
+                            {booking.booking_type === 'bundle'
+                              ? <Luggage size={22} className="text-[#C47245]" />
+                              : booking.booking_type === 'flight'
                               ? <Plane size={22} className="text-[#C47245]" />
                               : <Hotel size={22} className="text-[#C47245]" />}
                           </div>
                           <div>
                             <h3 className="text-xl font-medium text-[#1C1917]"
                               style={{ fontFamily: 'Cormorant Garamond, serif' }}>
-                              {booking.item_data.name || `${booking.item_data.airline} ${booking.item_data.flight_number}`}
+                              {booking.booking_type === 'bundle'
+                                ? `${booking.trip_summary?.destination || 'Trip'} — ${
+                                    booking.line_items.map(li => li.type === 'flight' ? 'Flight' : 'Hotel').join(' + ')
+                                  }`
+                                : (booking.item_data.name || `${booking.item_data.airline} ${booking.item_data.flight_number}`)}
                             </h3>
                             <p className="text-sm text-[#57534E] mt-1">
                               Confirmation: <span className="font-mono font-medium text-[#1C1917]">{booking.confirmation_code}</span>
@@ -694,6 +700,25 @@ const BookingPage = ({ user }) => {
                                 );
                               })()}
                             </div>
+                            {booking.booking_type === 'bundle' && (
+                              <div className="mt-3 space-y-1.5">
+                                {booking.line_items.map((item, i) => (
+                                  <div key={i} className="flex items-center gap-2 text-sm text-[#57534E]">
+                                    {item.type === 'flight'
+                                      ? <Plane size={14} className="text-[#C47245] shrink-0" />
+                                      : <Hotel size={14} className="text-[#C47245] shrink-0" />}
+                                    <span>
+                                      {item.type === 'flight'
+                                        ? `${item.details.airline} ${item.details.flight_number}`
+                                        : `${item.details.name}${item.details.stars ? ` (${item.details.stars}★)` : ''}`}
+                                    </span>
+                                    <span className="text-[#1C1917] font-medium">
+                                      {formatCurrency(item.price, booking.currency)}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
                           </div>
                         </div>
                         <div className="text-right">

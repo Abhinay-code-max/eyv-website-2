@@ -165,6 +165,8 @@ const TripResultsPage = () => {
   const [mapMarkers, setMapMarkers] = useState([]);
   const [regenerating, setRegenerating] = useState(false);
   const [regenerateError, setRegenerateError] = useState(null);
+  const [bookingPlan, setBookingPlan] = useState(false);
+  const [bookingError, setBookingError] = useState(null);
   const [chatOpen, setChatOpen] = useState(false);
   const [chatMessage, setChatMessage] = useState('');
   const [chatHistory, setChatHistory] = useState([]);
@@ -299,6 +301,39 @@ const TripResultsPage = () => {
       );
     } finally {
       setRegenerating(false);
+    }
+  };
+
+  // "Book this Plan" - one bundled booking + one checkout for every real
+  // bookable item (flight/hotel) in the selected tier, charging only for
+  // those, not the plan's full displayed total (which includes activities/
+  // meals/misc - never actually reservable through this app). Mirrors
+  // BookingPage.jsx's confirmBooking: create the booking, then immediately
+  // start checkout for it and redirect.
+  const handleBookPlan = async () => {
+    if (!selectedPlan) return;
+    setBookingPlan(true);
+    setBookingError(null);
+    try {
+      const bookingResponse = await axios.post(
+        `${API_URL}/trips/${tripId}/book/${selectedPlan.plan_type}`,
+        {},
+        { withCredentials: true }
+      );
+      const checkoutResponse = await axios.post(
+        `${API_URL}/payments/checkout`,
+        { booking_id: bookingResponse.data.booking_id, origin_url: window.location.origin },
+        { withCredentials: true }
+      );
+      if (checkoutResponse.data.url) {
+        window.location.href = checkoutResponse.data.url;
+      }
+    } catch (error) {
+      console.error('Error booking plan:', error);
+      setBookingError(
+        error.response?.data?.detail || 'Could not start booking. Please try again.'
+      );
+      setBookingPlan(false);
     }
   };
 
@@ -616,18 +651,39 @@ const TripResultsPage = () => {
                 </>
               )}
 
-              {/* Save CTA */}
-              <div className="flex justify-center pb-8">
-                <motion.div whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.97 }}>
-                  <Button
-                    onClick={() => navigate('/dashboard')}
-                    className="text-white px-10 py-6 text-lg rounded-2xl shadow-xl hover:shadow-2xl transition-all gap-2"
-                    style={{ background: `linear-gradient(135deg, ${ps.accent}, ${ps.accent}CC)` }}
-                  >
-                    <Sparkles size={20} />
-                    Save to Dashboard
-                  </Button>
-                </motion.div>
+              {/* Book / Save CTAs */}
+              <div className="flex flex-col items-center gap-3 pb-8">
+                <div className="flex flex-wrap justify-center gap-4">
+                  <motion.div whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.97 }}>
+                    <Button
+                      data-testid={TRIP_PLANNER.bookPlanButton}
+                      onClick={handleBookPlan}
+                      disabled={bookingPlan || selectedPlan.status !== 'ready'}
+                      className="text-white px-10 py-6 text-lg rounded-2xl shadow-xl hover:shadow-2xl transition-all gap-2"
+                      style={{ background: `linear-gradient(135deg, ${ps.accent}, ${ps.accent}CC)` }}
+                    >
+                      <Plane size={20} />
+                      {bookingPlan ? 'Starting checkout…' : 'Book this Plan'}
+                    </Button>
+                  </motion.div>
+                  <motion.div whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.97 }}>
+                    <Button
+                      onClick={() => navigate('/dashboard')}
+                      variant="outline"
+                      className="px-10 py-6 text-lg rounded-2xl gap-2"
+                    >
+                      <Sparkles size={20} />
+                      Save to Dashboard
+                    </Button>
+                  </motion.div>
+                </div>
+                <p className="text-sm text-[#57534E] max-w-md text-center">
+                  Books and charges only the real flight/hotel in this plan - activities,
+                  meals, and other estimates stay informational.
+                </p>
+                {bookingError && (
+                  <p className="text-sm text-red-600 max-w-md text-center">{bookingError}</p>
+                )}
               </div>
             </motion.div>
           </AnimatePresence>
