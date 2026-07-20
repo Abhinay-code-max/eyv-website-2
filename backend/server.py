@@ -63,6 +63,28 @@ GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
 OAUTH_TICKET_TTL_SECONDS = 300
 ADMIN_API_KEY = os.environ.get('ADMIN_API_KEY')
 
+
+def _resolve_cors_origins() -> List[str]:
+    """Explicit allowlist only - no wildcard fallback. Combined with the
+    allow_credentials=True on the CORSMiddleware below, a "*" origin makes
+    Starlette reflect back whatever Origin sent the request whenever a
+    cookie is present (see CORSMiddleware.send()), letting any website ride
+    a logged-in user's session_token cookie into this API. Fail loudly at
+    import time instead of ever silently allowing that - a crashed deploy
+    is recoverable, a silently wide-open CORS policy isn't."""
+    origins = [o.strip() for o in os.environ.get('CORS_ORIGINS', '').split(',') if o.strip()]
+    if not origins or '*' in origins:
+        raise RuntimeError(
+            "CORS_ORIGINS must be a comma-separated list of explicit origins "
+            "(e.g. http://localhost:3000) - it is unset or contains '*', which "
+            "is incompatible with allow_credentials=True. Set it in backend/.env "
+            "for local dev and in Railway's service variables for deploys."
+        )
+    return origins
+
+
+CORS_ORIGINS = _resolve_cors_origins()
+
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
 
@@ -2862,7 +2884,7 @@ app.include_router(api_router)
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_origins=CORS_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
