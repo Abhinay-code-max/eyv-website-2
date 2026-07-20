@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # Picks up .gitleaks.toml from the repo root automatically - the same
+      # config the local pre-commit hook (.pre-commit-config.yaml) uses, so
+      # CI and local runs flag the same things.
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  backend-tests:
+    runs-on: ubuntu-latest
+    env:
+      # Only need to satisfy server.py's os.environ['MONGO_URL'/'DB_NAME']
+      # at import time - the test files run below never touch a real
+      # database, so no mongo service container is started here. See the
+      # note above the pytest step for what's deliberately excluded and why.
+      MONGO_URL: mongodb://localhost:27017
+      DB_NAME: ci_test_database
+      # server.py now raises at import time if this is unset/wildcard (CORS
+      # security fix) - any explicit value satisfies it since these tests
+      # never make a cross-origin request.
+      CORS_ORIGINS: http://localhost:3000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: backend/requirements.txt
+      - name: Install backend dependencies
+        working-directory: backend
+        run: pip install -r requirements.txt
+      # Deliberately scoped to the subset of the suite that's fast,
+      # deterministic, and self-contained (no live server, no real mongo,
+      # no external API calls) - safe to gate merges on. Excluded, and why:
+      #   - backend_test.py / test_new_features.py / test_rewards_payments.py:
+      #     authenticate via a hardcoded fallback session token with no
+      #     matching DB session, so every request 401s before real test
+      #     logic runs (pre-existing gap, tracked separately).
+      #   - test_trip_regenerate.py / test_rate_limit_quota.py /
+      #     test_progressive_generation.py: need a live running backend +
+      #     real mongo, and at least two of them make real (if cheap) Gemini
+      #     API calls - not something a merge gate should depend on.
+      #   - test_cruise_pricing.py: work in progress, not wired into any
+      #     gate yet.
+      #   - "-k not live": drops the handful of tests inside the files below
+      #     that are themselves live-server/live-API checks (e.g.
+      #     test_*_live in test_group_pricing.py, the live SerpApi check in
+      #     test_log_redaction.py).
+      - name: Run backend unit tests
+        working-directory: backend
+        run: |
+          pytest \
+            tests/test_hotel_data_integrity.py \
+            tests/test_log_redaction.py \
+            tests/test_group_pricing.py \
+            tests/test_plan_generation_crash.py \
+            -k "not live" -v
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build backend image
+        working-directory: backend
+        run: docker build -t eyv-backend:ci .
+
+  frontend-build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'yarn'
+          cache-dependency-path: frontend/yarn.lock
+      - run: yarn install --frozen-lockfile
+      # CRA's build script treats ESLint warnings as errors whenever CI is
+      # truthy (GitHub Actions sets this by default) - intentionally left
+      # at that default so a new warning fails this gate instead of
+      # slipping through silently.
+      - run: yarn build
