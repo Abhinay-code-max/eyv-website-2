@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useState } from 'react';
+import React, { useCallback, useRef, useEffect, useState } from 'react';
 import {
   motion,
   useScroll,
@@ -118,7 +118,10 @@ const ScrollPlane = () => {
   }, [d]);
 
   // Position the plane + reveal the trail in response to scroll (imperative = no re-render).
-  const update = (p) => {
+  // useCallback keyed on the same [amp, pathLen] the effect below already
+  // depends on, so adding `update` to that effect's deps doesn't change
+  // when it fires - it's only recreated when amp/pathLen actually change.
+  const update = useCallback((p) => {
     const plane = planeRef.current;
     if (plane) {
       const a = curveAt(p, amp);
@@ -131,11 +134,11 @@ const ScrollPlane = () => {
     if (trailRef.current && pathLen) {
       trailRef.current.style.strokeDashoffset = String(pathLen * (1 - p));
     }
-  };
+  }, [amp, pathLen]);
 
   useMotionValueEvent(scrollYProgress, 'change', update);
   // Set initial position once we have a measured length.
-  useEffect(() => { update(scrollYProgress.get()); /* eslint-disable-next-line */ }, [pathLen, amp]);
+  useEffect(() => { update(scrollYProgress.get()); }, [scrollYProgress, update]);
 
   const tint = useTransform(
     scrollYProgress,

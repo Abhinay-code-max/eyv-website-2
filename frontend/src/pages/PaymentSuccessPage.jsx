@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import axios from 'axios';
 import { motion } from 'framer-motion';
@@ -9,28 +9,23 @@ import { formatCurrency } from '../lib/currency';
 import EYVLogo from '../components/EYVLogo';
 import { Button } from '../components/ui/button';
 
+const MAX_POLLS = 10;
+
 const PaymentSuccessPage = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const [status, setStatus] = useState('checking');
   const [details, setDetails] = useState(null);
   const pollCount = useRef(0);
-  const maxPolls = 10;
 
-  useEffect(() => {
-    const params = new URLSearchParams(location.search);
-    const sessionId = params.get('session_id');
-
-    if (!sessionId) {
-      setStatus('error');
-      return;
-    }
-
-    pollStatus(sessionId);
-  }, [location]);
-
-  const pollStatus = async (sessionId) => {
-    if (pollCount.current >= maxPolls) {
+  // useCallback with no deps: doesn't close over anything reactive (pollCount
+  // is a ref, MAX_POLLS is a module-level constant), so this reference never
+  // changes. Depending on it in the effect below therefore can't cause the
+  // effect to re-fire on its own - if it weren't stable, every setStatus/
+  // setDetails call inside a poll would re-render, mint a new pollStatus, and
+  // (with it in the deps array) kick off a second concurrent polling loop.
+  const pollStatus = useCallback(async (sessionId) => {
+    if (pollCount.current >= MAX_POLLS) {
       setStatus('timeout');
       return;
     }
@@ -58,7 +53,19 @@ const PaymentSuccessPage = () => {
       console.error('Status check error:', error);
       setStatus('error');
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const sessionId = params.get('session_id');
+
+    if (!sessionId) {
+      setStatus('error');
+      return;
+    }
+
+    pollStatus(sessionId);
+  }, [location, pollStatus]);
 
   return (
     <div data-testid={PAYMENT.successPage} className="min-h-screen bg-gradient-to-br from-[#FDFBF7] via-[#F5F2EB] to-[#FDFBF7] flex items-center justify-center px-4">
