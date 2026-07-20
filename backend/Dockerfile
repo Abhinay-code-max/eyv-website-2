@@ -2,7 +2,7 @@
 
 # ---- Builder: compile/resolve dependencies only, discarded after this stage
 # so no compiler toolchain ends up in the final image. -------------------
-FROM python:3.14.4-slim AS builder
+FROM python:3.12-slim AS builder
 
 # Safety net for any dependency in requirements.txt that doesn't ship a
 # prebuilt wheel for this Python version and has to compile from source
@@ -26,7 +26,7 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 
 # ---- Final: minimal runtime image --------------------------------------
-FROM python:3.14.4-slim AS final
+FROM python:3.12-slim AS final
 
 RUN groupadd --system appuser \
     && useradd --system --gid appuser --home-dir /app --shell /usr/sbin/nologin appuser
