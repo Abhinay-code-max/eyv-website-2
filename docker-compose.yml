@@ -1,0 +1,39 @@
+# Local dev convenience only - NOT part of the deploy path. Production
+# deploys backend to Railway/Fly (its own Dockerfile, no compose) and
+# frontend straight to Vercel's native build (no Dockerfile at all).
+#
+# Prereq: backend/.env must exist (copy backend/.env.example -> backend/.env
+# and fill in real API keys, same as running the backend without Docker).
+# MONGO_URL is overridden below regardless of what's in that .env - inside
+# this network "localhost" would mean the backend's own container, not the
+# mongo service, so it has to point at the service name instead.
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
+    environment:
+      MONGO_URL: mongodb://mongo:27017
+    ports:
+      - "8001:8001"
+    depends_on:
+      mongo:
+        condition: service_healthy
+
+volumes:
+  mongo_data:

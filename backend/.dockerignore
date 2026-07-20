@@ -1,0 +1,16 @@
+# Windows venv - huge, and irrelevant (the image builds its own inside the
+# builder stage). Never actually COPYed by the Dockerfile, but excluding it
+# keeps the build context upload from being needlessly slow.
+venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+
+# Secrets - real values come from the platform's env at container start,
+# never baked into the image.
+.env
+.env.local
+
+# Dev-only tooling (Stripe CLI binary etc.) - not needed at runtime.
+tools/
