@@ -7,6 +7,7 @@ Same output shape as all previous flight services.
 import os
 import logging
 import httpx
+import sentry_sdk
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Optional
 
@@ -183,9 +184,11 @@ async def search_flights(
 
     except httpx.HTTPStatusError as e:
         logger.error(f"Ignav API error: {e.response.status_code} - {e.response.text[:300]}")
+        sentry_sdk.capture_exception(e, tags={"provider": "ignav"})
         return []
     except Exception as e:
         logger.error(f"Ignav error: {e}")
+        sentry_sdk.capture_exception(e, tags={"provider": "ignav"})
         return []
 
 

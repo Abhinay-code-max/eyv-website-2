@@ -6,6 +6,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
 import math
+import subprocess
 from pathlib import Path
 
 # Must run before importing any service module below - several of them read
@@ -25,6 +26,8 @@ from openai import AsyncOpenAI
 from google import genai
 from google.genai import types as genai_types
 import stripe
+import sentry_sdk
+from pythonjsonlogger.json import JsonFormatter
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from services import amadeus_service, storage_service, rewards_service, locations_service
 from services import ignav_service as duffel_service  # Ignav replaces Sky Scrapper
@@ -34,6 +37,8 @@ from services import log_redaction
 from services import quota_service, usage_service
 from services import chat_service
 from services import booking_expiry_service
+from services import sentry_service
+from services.request_id_middleware import RequestIDMiddleware, RequestIDLogFilter, request_id_var
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -72,6 +77,31 @@ api_router = APIRouter(prefix="/api")
 _SERVER_STARTED_AT = datetime.now(timezone.utc)
 _SERVER_PID = os.getpid()
 
+
+def _resolve_app_version() -> str:
+    """Short commit hash the running process was built from, for GET /health
+    and Sentry's `release`. APP_VERSION (set by the platform at build/deploy
+    time - e.g. a Docker build ARG baking in `git rev-parse --short HEAD`, or
+    Railway/Vercel's own git-sha env var) always wins so a deployed instance
+    reports exactly what's live rather than whatever happened to be checked
+    out wherever the image was built. Falls back to reading git directly,
+    which only works when running from a working tree with .git present -
+    i.e. local dev, not inside a built container image."""
+    env_version = os.environ.get('APP_VERSION')
+    if env_version:
+        return env_version
+    try:
+        result = subprocess.run(
+            ['git', 'rev-parse', '--short', 'HEAD'],
+            cwd=ROOT_DIR, capture_output=True, text=True, timeout=2, check=True,
+        )
+        return result.stdout.strip()
+    except Exception:
+        return 'unknown'
+
+
+APP_VERSION = _resolve_app_version()
+
 # ── Rate limiting ────────────────────────────────────────────────────────
 # In-memory storage: no Redis in this deployment (single process, no
 # multi-worker/multi-instance setup) - if that changes, point these at
@@ -109,6 +139,7 @@ async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded):
         content={
             "detail": "Too many requests - please slow down and try again shortly.",
             "reason": "rate_limited",
+            "request_id": request_id_var.get(),
         },
     )
     # exc.limit.limit is the underlying limits.RateLimitItem (e.g. "5 per
@@ -147,18 +178,43 @@ async def quota_exceeded_handler(request: Request, exc: QuotaExceededError):
             "reason": "quota_exceeded",
             "used": exc.used,
             "limit": exc.limit,
+            "request_id": request_id_var.get(),
         },
     )
 
 
 app.add_exception_handler(QuotaExceededError, quota_exceeded_handler)
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+_log_handler = logging.StreamHandler()
+_log_handler.setFormatter(JsonFormatter(
+    '%(asctime)s %(levelname)s %(name)s %(message)s %(request_id)s'
+))
+_log_handler.addFilter(RequestIDLogFilter())
+logging.basicConfig(level=logging.INFO, handlers=[_log_handler])
 logger = logging.getLogger(__name__)
 # SerpApi's api_key travels as a URL query param (no header alternative -
 # confirmed against their docs/client source) and httpx logs full request
 # URLs at INFO - scrub it before it reaches any handler, at any log level.
 log_redaction.install_secret_redaction()
+
+sentry_service.init_sentry(APP_VERSION)
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """Catch-all for anything that isn't a deliberately-raised HTTPException
+    (those keep using FastAPI's own default handler/response shape, untouched
+    here - this only fires for genuine bugs/unexpected failures). Registering
+    this handler means such exceptions no longer propagate out of the ASGI
+    app, so Sentry's Starlette/FastAPI integration - which only auto-captures
+    exceptions that actually propagate - would otherwise miss them entirely;
+    capture explicitly here instead."""
+    logger.error(f"Unhandled exception: {exc}", exc_info=exc)
+    sentry_sdk.capture_exception(exc)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error", "request_id": request_id_var.get()},
+    )
 
 # Models
 class User(BaseModel):
@@ -1293,6 +1349,7 @@ MEAL AND ACTIVITY PRICING (group size = {num_travelers}):
     # indistinguishable from a real (if oddly priced) plan, so it got persisted
     # and shown to the user as if generation had succeeded.
     logger.error(f"All {max_attempts} attempts failed for {plan_type} plan: {last_error}")
+    sentry_sdk.capture_exception(last_error, tags={"provider": "gemini", "plan_type": plan_type})
     return {
         "plan_type": plan_type,
         "status": "failed",
@@ -2602,6 +2659,7 @@ async def stripe_webhook(request: Request):
         raise
     except Exception as e:
         logger.error(f"Webhook error: {e}")
+        sentry_sdk.capture_exception(e, tags={"provider": "stripe"})
         # Return non-2xx so Stripe retries the webhook
         raise HTTPException(status_code=400, detail=f"Webhook processing failed: {str(e)}")
 
@@ -2808,6 +2866,38 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Added last so it ends up outermost in the middleware stack (Starlette
+# wraps in reverse add-order) - the request ID needs to be established
+# before anything else touches the request, and the X-Request-ID header
+# needs to be the last thing added before the response actually leaves.
+app.add_middleware(RequestIDMiddleware)
+
+
+@app.get("/health")
+async def health_check():
+    """Deliberately at bare /health, not /api/health - this is what an
+    infra layer (Railway healthcheckPath, UptimeRobot) polls, and those
+    conventionally expect a stable, unversioned root-level path regardless
+    of whatever the app's own API prefix happens to be."""
+    uptime_seconds = (datetime.now(timezone.utc) - _SERVER_STARTED_AT).total_seconds()
+    try:
+        await asyncio.wait_for(db.command('ping'), timeout=3.0)
+        mongo_ok = True
+    except Exception as e:
+        logger.error(f"Health check: MongoDB ping failed: {e}")
+        mongo_ok = False
+
+    return JSONResponse(
+        status_code=200 if mongo_ok else 503,
+        content={
+            "status": "ok" if mongo_ok else "degraded",
+            "version": APP_VERSION,
+            "uptime_seconds": round(uptime_seconds, 1),
+            "mongo": "ok" if mongo_ok else "unreachable",
+        },
+    )
+
 
 @app.on_event("shutdown")
 async def shutdown_db_client():

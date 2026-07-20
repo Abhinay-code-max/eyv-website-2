@@ -8,6 +8,7 @@ drop-in replacement for the rest of the app.
 import os
 import logging
 import httpx
+import sentry_sdk
 from typing import List, Dict, Optional
 
 from . import ignav_service
@@ -75,9 +76,11 @@ async def search_hotels(
 
     except httpx.HTTPStatusError as e:
         logger.error(f"SerpApi hotel error: {e.response.status_code} - {e.response.text[:200]}")
+        sentry_sdk.capture_exception(e, tags={"provider": "serpapi"})
         return []
     except Exception as e:
         logger.error(f"SerpApi hotel error: {e}")
+        sentry_sdk.capture_exception(e, tags={"provider": "serpapi"})
         return []
 
 
