@@ -4,13 +4,25 @@ import io
 import pytest
 import requests
 
+from conftest import seed_session, delete_session
+
 BASE_URL = os.environ.get(
     'REACT_APP_BACKEND_URL',
     'http://localhost:8001'
 ).rstrip('/')
 SESSION_TOKEN = os.environ.get('TEST_SESSION_TOKEN', 'test_session_eyv_1780670554293')
+USER_ID = "test_new_features_user"
 HEADERS = {"Authorization": f"Bearer {SESSION_TOKEN}", "Content-Type": "application/json"}
 AUTH_HEADER = {"Authorization": f"Bearer {SESSION_TOKEN}"}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _seeded_session():
+    # The token above has no matching session in a fresh/CI DB - seed one
+    # directly so tests authenticate without depending on a real login flow.
+    seed_session(USER_ID, SESSION_TOKEN)
+    yield
+    delete_session(USER_ID, SESSION_TOKEN)
 
 
 # ========== Flight Search ==========

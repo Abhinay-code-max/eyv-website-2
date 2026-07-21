@@ -7,10 +7,18 @@ Endpoints under test:
 - /api/webhook/stripe (POST)
 """
 import os
+import sys
 import asyncio
 import pytest
 import requests
 from motor.motor_asyncio import AsyncIOMotorClient
+
+# Needed for the `from services import ...` imports done inline further down
+# (e.g. rewards_service, ignav_service) - without this, running this file in
+# isolation (rather than as part of a full-suite run where some other file
+# happens to have already inserted this path) raises ModuleNotFoundError.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from conftest import seed_session, delete_session  # noqa: E402
 
 BASE_URL = os.environ.get(
     'REACT_APP_BACKEND_URL',
@@ -27,6 +35,18 @@ DB_NAME = os.environ.get('DB_NAME', 'test_database')
 
 def _db():
     return AsyncIOMotorClient(MONGO_URL)[DB_NAME]
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _seeded_session():
+    # The token above has no matching session in a fresh/CI DB - seed one
+    # directly so tests authenticate without depending on a real login flow.
+    # The per-test _setup() blocks below already seed db.user_rewards/
+    # db.users state; this was the missing piece (db.user_sessions) that
+    # actually gates every request through get_current_user.
+    seed_session(USER_ID, SESSION_TOKEN)
+    yield
+    delete_session(USER_ID, SESSION_TOKEN)
 
 
 def _expected_inr(usd_amount):
