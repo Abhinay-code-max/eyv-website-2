@@ -7,6 +7,7 @@ import os
 import logging
 import math
 import subprocess
+import functools
 from pathlib import Path
 
 # Must run before importing any service module below - several of them read
@@ -47,10 +48,30 @@ mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
-openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)  # kept for potential future switch-back, currently unused
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
-gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 GEMINI_MODEL = "gemini-2.5-flash"  # gemini-2.0-flash/-lite return 429 (zero free-tier quota) and gemini-1.5-flash is 404 on this API key/version
+
+
+@functools.lru_cache(maxsize=1)
+def _get_openai_client() -> AsyncOpenAI:
+    """Lazy singleton - kept for potential future switch-back, currently
+    unused. AsyncOpenAI(api_key=...) raises immediately if the key is
+    None (unset), so constructing this eagerly at import time meant a
+    missing OPENAI_API_KEY crashed the entire server at boot, not just
+    whatever would eventually use this client."""
+    return AsyncOpenAI(api_key=OPENAI_API_KEY)
+
+
+@functools.lru_cache(maxsize=1)
+def _get_gemini_client() -> genai.Client:
+    """Lazy singleton - genai.Client(api_key=...) raises ValueError
+    immediately if the key is None/blank, so constructing this eagerly at
+    import time meant a missing GEMINI_API_KEY crashed the entire server
+    at boot (auth, bookings, every unrelated endpoint), not just trip
+    generation and chat. Now that failure only happens the first time
+    something that actually needs Gemini runs, scoped to just that
+    request instead of the whole process."""
+    return genai.Client(api_key=GEMINI_API_KEY)
 stripe.api_key = os.environ.get('STRIPE_API_KEY')
 
 GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID')
@@ -1198,7 +1219,7 @@ MEAL AND ACTIVITY PRICING (group size = {num_travelers}):
             f"Never invent or change these numbers."
         )
 
-        stream = await gemini_client.aio.models.generate_content_stream(
+        stream = await _get_gemini_client().aio.models.generate_content_stream(
             model=GEMINI_MODEL,
             contents=prompt,
             config=genai_types.GenerateContentConfig(
@@ -1599,7 +1620,7 @@ async def chat_stream(chat_msg: ChatMessage, request: Request):
     async def event_generator():
         full_response = ""
         try:
-            stream = await gemini_client.aio.models.generate_content_stream(
+            stream = await _get_gemini_client().aio.models.generate_content_stream(
                 model=GEMINI_MODEL,
                 contents=gemini_contents,
                 config=genai_types.GenerateContentConfig(

@@ -79,7 +79,8 @@ async def _no_hotels(*args, **kwargs):
 
 
 def _run_with_mocked_ai(monkeypatch, malformed_plan: dict) -> dict:
-    monkeypatch.setattr(server, "gemini_client", _FakeGeminiClient(json.dumps(malformed_plan)))
+    fake_client = _FakeGeminiClient(json.dumps(malformed_plan))
+    monkeypatch.setattr(server, "_get_gemini_client", lambda: fake_client)
     monkeypatch.setattr(server.usage_service, "log_usage", _noop_log_usage)
     monkeypatch.setattr(server.serpapi_hotels_service, "search_hotels", _no_hotels)
     return asyncio.run(server.generate_single_plan(dict(PREFS), "Premium", "trip_test_crash", "user_test"))

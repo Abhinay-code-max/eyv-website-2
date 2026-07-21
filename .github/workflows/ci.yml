@@ -37,13 +37,12 @@ jobs:
       # security fix) - any explicit value satisfies it since these tests
       # never make a cross-origin request.
       CORS_ORIGINS: http://localhost:3000
-      # server.py:50 constructs AsyncOpenAI(api_key=OPENAI_API_KEY) eagerly
-      # at import time - the SDK itself raises if this is None, even though
-      # that client is otherwise unused. Placeholder only, satisfies import;
-      # nothing here ever makes a real OpenAI call.
+      # OpenAI/Gemini clients are now lazy singletons (_get_openai_client /
+      # _get_gemini_client in server.py), constructed on first real use
+      # rather than at import time, so these are no longer required just to
+      # import server.py. Left set as harmless placeholders in case that
+      # ever regresses. Nothing here ever makes a real OpenAI/Gemini call.
       OPENAI_API_KEY: sk-ci-placeholder-unused
-      # Same import-time construction pattern for genai.Client(). Placeholder
-      # only - these tests never make a real Gemini call.
       GEMINI_API_KEY: ci-placeholder-unused
     steps:
       - uses: actions/checkout@v4
