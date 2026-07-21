@@ -1132,6 +1132,46 @@ async def generate_single_plan(
   Stars: {hotel_stars}★
   PRICE PER NIGHT: ₹{hotel_price_per_night:,.0f} total for {room_count} room(s) accommodating {num_travelers} traveler(s) (USE THIS EXACT NUMBER)""" if hotel_price_per_night > 0 else "Use realistic market hotel prices."
 
+    # Mode-agnostic descriptive flavor for the itinerary text (activities/
+    # meals/highlights) - same "narrative color, not pricing" role as
+    # cruise_flavor_block above, but applies to every transport mode since
+    # interests/dietary_preferences/accessibility_requirements/travel_pace
+    # are collected in the same "Interests" and "Additional Details" wizard
+    # steps regardless of transportation choice. interests and travel_pace
+    # are structured fields with sensible defaults from the UI, so they're
+    # included whenever present; dietary_preferences and
+    # accessibility_requirements are free-text and blank for most users, so
+    # they're only added when the user actually wrote something - otherwise
+    # this block would print "Accessibility needs: none" into nearly every
+    # prompt for no benefit.
+    traveler_preference_lines = []
+    interests = preferences.get("interests") or []
+    if interests:
+        traveler_preference_lines.append(
+            f"- Interests: {', '.join(interests)} - weave activities and highlights toward these where it fits naturally"
+        )
+    travel_pace = preferences.get("travel_pace")
+    if travel_pace:
+        pace_guidance = {
+            "Relaxed": "favor a lighter schedule - fewer activities per day, more downtime",
+            "Fast-paced": "pack more activities into each day, minimize downtime",
+        }.get(travel_pace, "a balanced, moderate number of activities per day")
+        traveler_preference_lines.append(f"- Pace: {travel_pace} - {pace_guidance}")
+    dietary_preferences = (preferences.get("dietary_preferences") or "").strip()
+    if dietary_preferences:
+        traveler_preference_lines.append(f"- Dietary: {dietary_preferences} - factor into meal suggestions")
+    accessibility_requirements = (preferences.get("accessibility_requirements") or "").strip()
+    if accessibility_requirements:
+        traveler_preference_lines.append(
+            f"- Accessibility: {accessibility_requirements} - factor into activity and accommodation choices"
+        )
+    traveler_preferences_block = ""
+    if traveler_preference_lines:
+        traveler_preferences_block = (
+            "TRAVELER PREFERENCES (reflect these in the itinerary's activities/meals/highlights "
+            "text - they do not change the prices above):\n" + "\n".join(traveler_preference_lines)
+        )
+
     prompt = f"""You are a travel pricing engine. Generate a {plan_type} trip plan as valid JSON only.
 
 ╔══════════════════════════════════════════════════════╗
@@ -1156,6 +1196,7 @@ TRIP DETAILS:
 TIER GUIDELINES:
 {tier_rules[plan_type]}
 
+{traveler_preferences_block}
 OUTPUT: Return ONLY valid JSON, no markdown, no explanation:
 {{
   "plan_type": "{plan_type}",
