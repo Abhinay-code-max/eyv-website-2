@@ -26,24 +26,60 @@ jobs:
 
   backend-tests:
     runs-on: ubuntu-latest
+    services:
+      # Same image docker-compose.yml uses locally. Published on 27017 same
+      # as the local compose file - service containers on a non-containerized
+      # job (no `container:` key below) are reachable from the runner via
+      # localhost on their published port, so MONGO_URL needs no change from
+      # what it already was. GitHub Actions blocks the job's own steps from
+      # starting until this healthcheck passes, so by the time "Install
+      # backend dependencies" runs, mongo is already accepting connections.
+      mongo:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand(\"ping\")'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env:
-      # Only need to satisfy server.py's os.environ['MONGO_URL'/'DB_NAME']
-      # at import time - the test files run below never touch a real
-      # database, so no mongo service container is started here. See the
-      # note above the pytest step for what's deliberately excluded and why.
       MONGO_URL: mongodb://localhost:27017
       DB_NAME: ci_test_database
       # server.py now raises at import time if this is unset/wildcard (CORS
       # security fix) - any explicit value satisfies it since these tests
       # never make a cross-origin request.
       CORS_ORIGINS: http://localhost:3000
-      # OpenAI/Gemini clients are now lazy singletons (_get_openai_client /
-      # _get_gemini_client in server.py), constructed on first real use
-      # rather than at import time, so these are no longer required just to
-      # import server.py. Left set as harmless placeholders in case that
-      # ever regresses. Nothing here ever makes a real OpenAI/Gemini call.
+      # OpenAI/Gemini clients are lazy singletons (_get_openai_client /
+      # _get_gemini_client in server.py) - not required just to import
+      # server.py. backend_test.py's real-Gemini-touching tests
+      # (test_chat_stream_authorized, test_trip_generate_and_lifecycle) still
+      # run with this placeholder: the Gemini call fails ("API key not
+      # valid"), generate_single_plan/chat_stream both already have a
+      # graceful-degradation path for that (see test_plan_generation_crash.py),
+      # and neither test asserts on real generated content - only on the
+      # request lifecycle/shape. So they pass, just without exercising a real
+      # model call. Confirmed by running against a real Gemini key locally
+      # too (docker exec into the dev backend container) - same pass result.
       OPENAI_API_KEY: sk-ci-placeholder-unused
       GEMINI_API_KEY: ci-placeholder-unused
+      # backend_test.py/test_new_features.py hit /trips/generate and
+      # /search/flights|hotels, whose flight/hotel anchor-pricing tries
+      # Duffel/SerpApi first and falls back to a mock generator on empty
+      # results - confirmed working with no IGNAV_API_KEY/SERPAPI_KEY/
+      # DUFFEL_API_KEY at all (falls back immediately, no hang/error), so
+      # those are deliberately left unset here rather than added as secrets
+      # for no behavioral benefit.
+      #
+      # test_rewards_payments.py's checkout tests are the one exception:
+      # POST /api/payments/checkout calls the real stripe.checkout.Session.create,
+      # gated by _ensure_stripe_configured() - there's no mock fallback for
+      # Stripe the way there is for flights/hotels. Needs a real Stripe
+      # *test-mode* secret key added as a repo secret named STRIPE_API_KEY
+      # (Settings > Secrets and variables > Actions) for those tests to pass;
+      # without it they fail with 500 "Stripe not configured" (confirmed).
+      STRIPE_API_KEY: ${{ secrets.STRIPE_API_KEY }}
+      REACT_APP_BACKEND_URL: http://localhost:8001
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -54,17 +90,33 @@ jobs:
       - name: Install backend dependencies
         working-directory: backend
         run: pip install -r requirements.txt
+      # backend_test.py/test_new_features.py/test_rewards_payments.py drive
+      # a real running backend over HTTP (unlike the four below, which never
+      # start one) - start it in the background and wait for /health before
+      # the pytest step runs.
+      - name: Start backend server
+        working-directory: backend
+        run: |
+          nohup python -m uvicorn server:app --host 0.0.0.0 --port 8001 > uvicorn.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8001/health > /dev/null; then
+              echo "Backend is up"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Backend failed to become healthy within 30s"
+          cat uvicorn.log
+          exit 1
       # Deliberately scoped to the subset of the suite that's fast,
-      # deterministic, and self-contained (no live server, no real mongo,
-      # no external API calls) - safe to gate merges on. Excluded, and why:
-      #   - backend_test.py / test_new_features.py / test_rewards_payments.py:
-      #     authenticate via a hardcoded fallback session token with no
-      #     matching DB session, so every request 401s before real test
-      #     logic runs (pre-existing gap, tracked separately).
+      # deterministic, and doesn't depend on a real Gemini/Duffel/SerpApi
+      # call succeeding - safe to gate merges on. Excluded, and why:
       #   - test_trip_regenerate.py / test_rate_limit_quota.py /
-      #     test_progressive_generation.py: need a live running backend +
-      #     real mongo, and at least two of them make real (if cheap) Gemini
-      #     API calls - not something a merge gate should depend on.
+      #     test_progressive_generation.py: at least two of them make real
+      #     (if cheap) Gemini API calls whose *content* the test actually
+      #     asserts on (unlike backend_test.py's generation test above,
+      #     which only checks the lifecycle contract) - not something a
+      #     merge gate should depend on succeeding.
       #   - test_cruise_pricing.py: work in progress, not wired into any
       #     gate yet.
       #   - "-k not live": drops the handful of tests inside the files below
@@ -79,7 +131,14 @@ jobs:
             tests/test_log_redaction.py \
             tests/test_group_pricing.py \
             tests/test_plan_generation_crash.py \
+            tests/backend_test.py \
+            tests/test_new_features.py \
+            tests/test_rewards_payments.py \
             -k "not live" -v
+      - name: Show backend server log on failure
+        if: failure()
+        working-directory: backend
+        run: cat uvicorn.log || true
 
   docker-build:
     runs-on: ubuntu-latest
