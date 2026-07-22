@@ -740,6 +740,17 @@ def _room_count(num_travelers: int, occupancy: int = ROOM_OCCUPANCY) -> int:
     return max(1, math.ceil(num_travelers / occupancy))
 
 
+async def _geocode_place(place: str) -> Optional[Dict[str, float]]:
+    """Geocode a place name using the same fallback chain as the
+    /destinations/{destination}/coords endpoint: curated list + Nominatim
+    first (locations_service), then amadeus_service's mock coords as a last
+    resort so callers always get *something* to plot rather than nothing."""
+    coords = await locations_service.geocode_destination(place)
+    if not coords:
+        coords = amadeus_service.get_destination_coords(place)
+    return coords
+
+
 def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     """Great-circle distance between two coordinates, in km."""
     r = 6371.0
@@ -948,6 +959,8 @@ async def _fetch_anchor_pricing(preferences: Dict, plan_type: str, user_id: str,
     road_price = 0
     road_distance_km = 0
     road_vehicle_count = 1
+    road_origin_coords = None
+    road_dest_coords = None
 
     hotel_name = ""
     hotel_price_per_night = 0
@@ -977,14 +990,17 @@ async def _fetch_anchor_pricing(preferences: Dict, plan_type: str, user_id: str,
         # amadeus_service's mock coords as the final fallback) since fuel
         # cost genuinely scales with distance in a way seat class doesn't.
         try:
-            origin_coords = await locations_service.geocode_destination(preferences.get("starting_location", ""))
-            if not origin_coords:
-                origin_coords = amadeus_service.get_destination_coords(preferences.get("starting_location", ""))
-            dest_coords = await locations_service.geocode_destination(preferences.get("destination", ""))
-            if not dest_coords:
-                dest_coords = amadeus_service.get_destination_coords(preferences.get("destination", ""))
+            origin_coords = await _geocode_place(preferences.get("starting_location", ""))
+            dest_coords = await _geocode_place(preferences.get("destination", ""))
 
             if origin_coords and dest_coords:
+                # Persisted alongside the price estimate so a later map-route
+                # request (see /trips/{trip_id}/road-route) can reuse this
+                # same geocode instead of hitting Nominatim again for the
+                # same two place names.
+                road_origin_coords = origin_coords
+                road_dest_coords = dest_coords
+
                 # Great-circle distance undercounts real road distance since
                 # roads bend - 1.3x is a commonly-used rule-of-thumb ratio of
                 # road distance to straight-line distance for regional/
@@ -1093,6 +1109,8 @@ async def _fetch_anchor_pricing(preferences: Dict, plan_type: str, user_id: str,
         "road_price": road_price,
         "road_distance_km": road_distance_km,
         "road_vehicle_count": road_vehicle_count,
+        "road_origin_coords": road_origin_coords,
+        "road_dest_coords": road_dest_coords,
         "flight_price": flight_price,
         "flight_airline": flight_airline,
         "flight_number": flight_number,
@@ -1622,8 +1640,68 @@ async def get_trip(trip_id: str, request: Request):
     
     if not trip:
         raise HTTPException(status_code=404, detail="Trip not found")
-    
+
     return trip
+
+
+@api_router.get("/trips/{trip_id}/road-route")
+async def get_trip_road_route(trip_id: str, request: Request):
+    """Real driving route (polyline + distance/duration) between a Road
+    trip's origin and destination - Phase 1 of the Road Trip map feature
+    (route + waypoints/rendering only; live position tracking and proximity
+    alerts are a later phase, not this one).
+
+    Reuses road_origin_coords/road_dest_coords already geocoded and
+    persisted on any generated tier's anchor_pricing (see
+    _fetch_anchor_pricing's is_road branch) instead of re-geocoding the same
+    two place names again on every map view - falls back to a fresh geocode
+    only for older trips saved before those fields existed.
+    """
+    user = await get_current_user(request)
+
+    trip = await db.trips.find_one(
+        {"trip_id": trip_id, "user_id": user.user_id},
+        {"_id": 0}
+    )
+    if not trip:
+        raise HTTPException(status_code=404, detail="Trip not found")
+
+    preferences = trip.get("preferences", {})
+    if "road" not in (preferences.get("transportation") or "").lower():
+        raise HTTPException(status_code=400, detail="This trip is not a Road trip")
+
+    origin_coords = None
+    dest_coords = None
+    for plan in trip.get("plans", []):
+        anchor = plan.get("anchor_pricing") or {}
+        if anchor.get("road_origin_coords") and anchor.get("road_dest_coords"):
+            origin_coords = anchor["road_origin_coords"]
+            dest_coords = anchor["road_dest_coords"]
+            break
+
+    if not origin_coords or not dest_coords:
+        origin_coords = await _geocode_place(preferences.get("starting_location", ""))
+        dest_coords = await _geocode_place(preferences.get("destination", ""))
+
+    if not origin_coords or not dest_coords:
+        raise HTTPException(status_code=502, detail="Could not geocode this trip's origin/destination")
+
+    route = await locations_service.get_driving_route(origin_coords, dest_coords)
+
+    return {
+        "origin": {
+            "lat": origin_coords["lat"], "lng": origin_coords["lng"],
+            "name": preferences.get("starting_location", ""),
+        },
+        "destination": {
+            "lat": dest_coords["lat"], "lng": dest_coords["lng"],
+            "name": preferences.get("destination", ""),
+        },
+        # None if OSRM failed - frontend falls back to a straight line
+        # between origin and destination.
+        "route": route,
+    }
+
 
 @api_router.delete("/trips/{trip_id}")
 async def delete_trip(trip_id: str, request: Request):
@@ -1986,6 +2064,20 @@ async def get_destination_coords_endpoint(destination: str, request: Request):
     if not coords:
         # Final fallback to amadeus mock coords
         coords = amadeus_service.get_destination_coords(destination)
+    return coords
+
+
+@api_router.get("/locations/venue-coords")
+async def get_venue_coords_endpoint(request: Request, name: str, city: str = ""):
+    """Geocode a named venue (hotel/restaurant/landmark) - NOT the same as
+    /destinations/{destination}/coords above, which is city-level only and
+    would short-circuit "venue, city"-style queries straight to the city's
+    curated centroid (see geocode_venue's docstring). Used by the Road Trip
+    map's per-day hotel waypoint markers (TripResultsPage.jsx)."""
+    await get_current_user(request)
+    coords = await locations_service.geocode_venue(name, city)
+    if not coords:
+        coords = amadeus_service.get_destination_coords(city or name)
     return coords
 
 

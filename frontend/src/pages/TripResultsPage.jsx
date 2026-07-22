@@ -28,6 +28,12 @@ const planStyle = (type) => PLAN_STYLES[type] || PLAN_STYLES.Premium;
 // "generating" - see the polling effect in TripResultsPage below.
 const POLL_INTERVAL_MS = 3000;
 
+// Matches the backend's own "road" in transport_mode.lower() check
+// (server.py's is_road detection) - same substring match, same case
+// insensitivity, so frontend and backend never disagree on what counts
+// as a Road trip.
+const isRoadTrip = (trip) => (trip?.preferences?.transportation || '').toLowerCase().includes('road');
+
 /* ─── collapsible day card ───────────────────────────────────────── */
 const DayCard = ({ day, details, formatCost, accent }) => {
   const [open, setOpen] = useState(true);
@@ -163,6 +169,13 @@ const TripResultsPage = () => {
   const [selectedPlan, setSelectedPlan] = useState(null);
   const [mapCenter, setMapCenter] = useState(null);
   const [mapMarkers, setMapMarkers] = useState([]);
+  // Road Trip map Phase 1 (route + waypoints/rendering only - live position
+  // tracking and proximity alerts are a later phase). Kept as their own
+  // state rather than folded into mapMarkers/mapCenter above, which stay
+  // exactly as they were for flight/train/cruise trips - see isRoadTrip below.
+  const [roadRoute, setRoadRoute] = useState(null);
+  const [roadOriginDestMarkers, setRoadOriginDestMarkers] = useState([]);
+  const [roadHotelMarkers, setRoadHotelMarkers] = useState([]);
   const [regenerating, setRegenerating] = useState(false);
   const [regenerateError, setRegenerateError] = useState(null);
   const [bookingPlan, setBookingPlan] = useState(false);
@@ -227,10 +240,89 @@ const TripResultsPage = () => {
   }, [tripId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (trip?.preferences?.destination) {
+    // Road trips own mapCenter/markers via the route effect below instead -
+    // this single-destination-pin behavior is unchanged for every other
+    // transportation mode.
+    if (trip?.preferences?.destination && !isRoadTrip(trip)) {
       fetchDestinationCoords(trip.preferences.destination);
     }
   }, [trip]);
+
+  // Road Trip map Phase 1: real driving route between origin and
+  // destination, via GET /trips/:id/road-route (OSRM under the hood - see
+  // that endpoint's docstring). Fetched once per trip, not on every poll
+  // tick, since the route itself doesn't change while a still-generating
+  // tier's other fields refresh.
+  useEffect(() => {
+    if (!trip?.preferences?.destination || !isRoadTrip(trip)) return;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const response = await axios.get(`${API_URL}/trips/${tripId}/road-route`, { withCredentials: true });
+        if (cancelled) return;
+        const { origin, destination, route } = response.data;
+        setRoadRoute(route?.points || null);
+        setMapCenter([destination.lat, destination.lng]);
+        setRoadOriginDestMarkers([
+          { lat: origin.lat, lng: origin.lng, title: origin.name, description: 'Trip start' },
+          { lat: destination.lat, lng: destination.lng, title: destination.name, description: 'Trip end' },
+        ]);
+      } catch (error) {
+        console.error('Road route fetch error:', error);
+      }
+    })();
+
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tripId, trip?.preferences?.destination, trip?.preferences?.transportation]);
+
+  // Road Trip map Phase 1 continued: waypoint markers for the AI-planned
+  // overnight stops (each day's hotel) on the CURRENTLY SELECTED plan -
+  // the map should reflect what's on screen, not all three tiers at once.
+  // Geocoded via /locations/venue-coords (NOT /destinations/{x}/coords -
+  // that one is city-level only and would resolve every "hotel, city"
+  // query straight to the city's centroid, see geocode_venue's docstring),
+  // deduped by hotel name (most itineraries repeat one or two hotels
+  // across days, and Nominatim's free tier isn't meant for bulk lookups).
+  // Always REPLACES roadHotelMarkers wholesale rather than appending, so
+  // this being re-run as `selectedPlan` naturally changes across
+  // polling/regeneration can't pile up duplicate pins for the same hotel.
+  useEffect(() => {
+    if (!isRoadTrip(trip) || !selectedPlan?.itinerary) return;
+
+    const hotelNames = [...new Set(
+      Object.values(selectedPlan.itinerary)
+        .map((day) => day?.accommodation?.name)
+        .filter(Boolean)
+    )];
+    if (hotelNames.length === 0) return;
+
+    let cancelled = false;
+
+    (async () => {
+      const hotelMarkers = [];
+      for (const hotelName of hotelNames) {
+        try {
+          const response = await axios.get(`${API_URL}/locations/venue-coords`, {
+            params: { name: hotelName, city: trip.preferences.destination },
+            withCredentials: true,
+          });
+          if (cancelled) return;
+          const { lat, lng } = response.data;
+          if (lat != null && lng != null) {
+            hotelMarkers.push({ lat, lng, title: hotelName, description: 'Overnight stop' });
+          }
+        } catch (error) {
+          console.error(`Hotel geocode error for "${hotelName}":`, error);
+        }
+      }
+      if (!cancelled) setRoadHotelMarkers(hotelMarkers);
+    })();
+
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedPlan, trip?.preferences?.destination]);
 
   // Load this trip's persisted chat history whenever tripId changes, using
   // the same `cancelled` guard as the trip-polling effect above so an
@@ -577,9 +669,15 @@ const TripResultsPage = () => {
                 <div className="bg-white rounded-2xl p-8 border border-[#E7E5E4] shadow-sm">
                   <h3 className="text-2xl font-medium text-[#2A4B5C] mb-6"
                     style={{ fontFamily: 'Cormorant Garamond, serif' }}>
-                    Destination Map
+                    {isRoadTrip(trip) ? 'Road Trip Route' : 'Destination Map'}
                   </h3>
-                  <TripMap center={mapCenter} markers={mapMarkers} height="400px" zoom={11} />
+                  <TripMap
+                    center={mapCenter}
+                    markers={isRoadTrip(trip) ? [...roadOriginDestMarkers, ...roadHotelMarkers] : mapMarkers}
+                    route={isRoadTrip(trip) ? roadRoute : null}
+                    height="400px"
+                    zoom={11}
+                  />
                 </div>
               )}
 

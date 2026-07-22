@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, Popup, Polyline, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import { MAP_VIEW } from '../constants/testIds';
 
@@ -38,7 +38,7 @@ const FlyToLocation = ({ center, zoom }) => {
   return null;
 };
 
-const TripMap = ({ center, markers = [], height = '500px', zoom = 12 }) => {
+const TripMap = ({ center, markers = [], route = null, height = '500px', zoom = 12 }) => {
   const validCenter =
     center && Array.isArray(center) && center.length === 2 && !isNaN(center[0]) && !isNaN(center[1])
       ? center
@@ -62,6 +62,9 @@ const TripMap = ({ center, markers = [], height = '500px', zoom = 12 }) => {
           maxZoom={19}
         />
         <FlyToLocation center={validCenter} zoom={zoom} />
+        {Array.isArray(route) && route.length > 1 && (
+          <Polyline positions={route} pathOptions={{ color: '#2A7D4F', weight: 4, opacity: 0.75 }} />
+        )}
         {markers.map((marker, idx) => (
           <Marker key={idx} position={[marker.lat, marker.lng]} icon={customIcon}>
             <Popup>

@@ -115,33 +115,16 @@ def search_locations(query: str, limit: int = 8) -> List[Dict]:
     ]
 
 
-async def geocode_destination(destination: str) -> Optional[Dict[str, float]]:
-    """
-    Get coords for a destination.
-    1. Check curated popular destinations first (exact and substring match)
-    2. Fall back to Nominatim (OpenStreetMap) for unknown locations
-    """
-    if not destination:
-        return None
-    
-    q = destination.lower().strip()
-    
-    # Try exact name match first
-    for dest in POPULAR_DESTINATIONS:
-        if dest['name'].lower() == q:
-            return {"lat": dest['lat'], "lng": dest['lng'], "name": dest['name']}
-    
-    # Try substring/contains match
-    for dest in POPULAR_DESTINATIONS:
-        if q in dest['name'].lower() or dest['name'].lower() in q:
-            return {"lat": dest['lat'], "lng": dest['lng'], "name": dest['name']}
-    
-    # Fall back to Nominatim geocoding (free, no API key)
+async def _nominatim_search(query: str) -> Optional[Dict[str, float]]:
+    """Raw Nominatim (OpenStreetMap) free-text geocode - no API key, no
+    curated-list shortcut. Shared by geocode_destination (city-level, tried
+    LAST after the curated list below) and geocode_venue (venue-level,
+    tried FIRST - see that function's docstring for why the order flips)."""
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.get(
                 "https://nominatim.openstreetmap.org/search",
-                params={"q": destination, "format": "json", "limit": 1},
+                params={"q": query, "format": "json", "limit": 1},
                 headers={"User-Agent": "EYV-Travel-App/1.0"},
                 timeout=10.0,
             )
@@ -152,9 +135,90 @@ async def geocode_destination(destination: str) -> Optional[Dict[str, float]]:
                     return {
                         "lat": float(result["lat"]),
                         "lng": float(result["lon"]),
-                        "name": result.get("display_name", destination).split(",")[0],
+                        "name": result.get("display_name", query).split(",")[0],
                     }
     except Exception as e:
-        logger.warning(f"Nominatim geocode failed for '{destination}': {e}")
-    
+        logger.warning(f"Nominatim geocode failed for '{query}': {e}")
+
+    return None
+
+
+async def geocode_destination(destination: str) -> Optional[Dict[str, float]]:
+    """
+    Get coords for a destination.
+    1. Check curated popular destinations first (exact and substring match)
+    2. Fall back to Nominatim (OpenStreetMap) for unknown locations
+    """
+    if not destination:
+        return None
+
+    q = destination.lower().strip()
+
+    # Try exact name match first
+    for dest in POPULAR_DESTINATIONS:
+        if dest['name'].lower() == q:
+            return {"lat": dest['lat'], "lng": dest['lng'], "name": dest['name']}
+
+    # Try substring/contains match
+    for dest in POPULAR_DESTINATIONS:
+        if q in dest['name'].lower() or dest['name'].lower() in q:
+            return {"lat": dest['lat'], "lng": dest['lng'], "name": dest['name']}
+
+    return await _nominatim_search(destination)
+
+
+async def geocode_venue(name: str, city: str = "") -> Optional[Dict[str, float]]:
+    """Geocode a NAMED venue (hotel, restaurant, landmark) within a city -
+    deliberately Nominatim-FIRST, unlike geocode_destination's curated-list-
+    first order above. geocode_destination's curated list only has ~80
+    city-level entries, but its substring match (`city name in query` /
+    `query in city name`) matches almost any "venue, city" query and would
+    always short-circuit straight to the city's centroid before Nominatim
+    ever got a chance - confirmed e.g. "Fairmont Jaipur, Jaipur" resolving
+    to plain Jaipur's centroid instead of the hotel's real coordinates
+    ~13km away. Falls back to the city centroid (via geocode_destination)
+    only if the venue-specific lookup genuinely fails, so callers still
+    get *something* to plot rather than nothing.
+    """
+    if not name:
+        return None
+    query = f"{name}, {city}" if city else name
+    coords = await _nominatim_search(query)
+    if coords:
+        return coords
+    return await geocode_destination(city)
+
+
+async def get_driving_route(origin: Dict[str, float], destination: Dict[str, float]) -> Optional[Dict]:
+    """Real driving route (polyline + distance/duration) between two geocoded
+    points, via OSRM's free public routing server (router.project-osrm.org) -
+    no API key or billing account, same free/keyless spirit as the Nominatim
+    geocoding above. That public server is meant for light/demo use (per
+    OSRM's own usage policy), so this stays best-effort: any failure just
+    returns None rather than raising, letting the caller fall back to a
+    straight line between the two points.
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"https://router.project-osrm.org/route/v1/driving/"
+                f"{origin['lng']},{origin['lat']};{destination['lng']},{destination['lat']}",
+                params={"overview": "full", "geometries": "geojson"},
+                timeout=10.0,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                routes = data.get("routes") or []
+                if routes:
+                    route = routes[0]
+                    # GeoJSON coordinates are [lng, lat] - Leaflet expects [lat, lng].
+                    points = [[lat, lng] for lng, lat in route["geometry"]["coordinates"]]
+                    return {
+                        "points": points,
+                        "distance_km": round(route["distance"] / 1000, 1),
+                        "duration_min": round(route["duration"] / 60),
+                    }
+    except Exception as e:
+        logger.warning(f"OSRM route fetch failed: {e}")
+
     return None
