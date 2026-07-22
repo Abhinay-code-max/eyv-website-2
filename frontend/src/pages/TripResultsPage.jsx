@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -33,6 +33,29 @@ const POLL_INTERVAL_MS = 3000;
 // insensitivity, so frontend and backend never disagree on what counts
 // as a Road trip.
 const isRoadTrip = (trip) => (trip?.preferences?.transportation || '').toLowerCase().includes('road');
+
+// Phase 2 (live position tracking + proximity alerts) - JS mirror of the
+// backend's _haversine_km (server.py), just in meters instead of km since
+// proximity thresholds are meaningfully sub-km.
+const haversineMeters = (lat1, lng1, lat2, lng2) => {
+  const R = 6371000;
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const phi1 = toRad(lat1);
+  const phi2 = toRad(lat2);
+  const dPhi = toRad(lat2 - lat1);
+  const dLambda = toRad(lng2 - lng1);
+  const a = Math.sin(dPhi / 2) ** 2 + Math.cos(phi1) * Math.cos(phi2) * Math.sin(dLambda / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+};
+
+// A waypoint's geocoding precision varies a lot (see Phase 1's geocode_venue
+// vs geocode_destination): a real hotel address is a precise point, but a
+// city-centroid fallback (or the origin/destination markers, which ARE city
+// centroids by definition) can genuinely be several km from where you
+// actually arrive. One flat threshold would either almost never fire for
+// city-level markers or fire too early for precise ones, so each waypoint
+// carries a `tier` and gets a different radius.
+const PROXIMITY_THRESHOLD_METERS = { venue: 500, city: 5000 };
 
 /* ─── collapsible day card ───────────────────────────────────────── */
 const DayCard = ({ day, details, formatCost, accent }) => {
@@ -169,13 +192,25 @@ const TripResultsPage = () => {
   const [selectedPlan, setSelectedPlan] = useState(null);
   const [mapCenter, setMapCenter] = useState(null);
   const [mapMarkers, setMapMarkers] = useState([]);
-  // Road Trip map Phase 1 (route + waypoints/rendering only - live position
-  // tracking and proximity alerts are a later phase). Kept as their own
+  // Road Trip map Phase 1 (route + waypoints/rendering). Kept as its own
   // state rather than folded into mapMarkers/mapCenter above, which stay
   // exactly as they were for flight/train/cruise trips - see isRoadTrip below.
   const [roadRoute, setRoadRoute] = useState(null);
   const [roadOriginDestMarkers, setRoadOriginDestMarkers] = useState([]);
   const [roadHotelMarkers, setRoadHotelMarkers] = useState([]);
+  // Road Trip map Phase 2: opt-in live position tracking + proximity
+  // alerts. Demo-grade only, by design - screen-on/tab-open is the
+  // accepted constraint, no background/PWA tracking attempted.
+  const [tripTracking, setTripTracking] = useState(false);
+  const [livePosition, setLivePosition] = useState(null);
+  const [locationError, setLocationError] = useState(null);
+  // Waypoints (hotels + final destination, origin excluded - the trip
+  // starts there) are checked strictly in order; once one triggers an
+  // alert it's handled permanently and the pointer advances - no
+  // "did we drive past it" detection needed for a demo.
+  const [nextWaypointIndex, setNextWaypointIndex] = useState(0);
+  const [activeAlert, setActiveAlert] = useState(null);
+  const watchIdRef = useRef(null);
   const [regenerating, setRegenerating] = useState(false);
   const [regenerateError, setRegenerateError] = useState(null);
   const [bookingPlan, setBookingPlan] = useState(false);
@@ -264,9 +299,11 @@ const TripResultsPage = () => {
         const { origin, destination, route } = response.data;
         setRoadRoute(route?.points || null);
         setMapCenter([destination.lat, destination.lng]);
+        // tier: 'city' - both are city centroids by definition (see
+        // Phase 2's PROXIMITY_THRESHOLD_METERS), not precise addresses.
         setRoadOriginDestMarkers([
-          { lat: origin.lat, lng: origin.lng, title: origin.name, description: 'Trip start' },
-          { lat: destination.lat, lng: destination.lng, title: destination.name, description: 'Trip end' },
+          { lat: origin.lat, lng: origin.lng, title: origin.name, description: 'Trip start', tier: 'city' },
+          { lat: destination.lat, lng: destination.lng, title: destination.name, description: 'Trip end', tier: 'city' },
         ]);
       } catch (error) {
         console.error('Road route fetch error:', error);
@@ -291,14 +328,23 @@ const TripResultsPage = () => {
   useEffect(() => {
     if (!isRoadTrip(trip) || !selectedPlan?.itinerary) return;
 
+    // Sorted by numeric day suffix, NOT object insertion order - "day_10"
+    // otherwise sorts before "day_2" as plain object keys, which would put
+    // waypoints in the wrong sequence for Phase 2's "next stop" pointer
+    // below (a cosmetic-only issue for the day cards further down the
+    // page, but a real one for proximity-alert ordering).
+    const sortedDays = Object.entries(selectedPlan.itinerary).sort(([a], [b]) => {
+      const na = parseInt(a.replace(/\D/g, ''), 10) || 0;
+      const nb = parseInt(b.replace(/\D/g, ''), 10) || 0;
+      return na - nb;
+    });
     const hotelNames = [...new Set(
-      Object.values(selectedPlan.itinerary)
-        .map((day) => day?.accommodation?.name)
-        .filter(Boolean)
+      sortedDays.map(([, day]) => day?.accommodation?.name).filter(Boolean)
     )];
     if (hotelNames.length === 0) return;
 
     let cancelled = false;
+    const destinationLower = (trip.preferences.destination || '').toLowerCase();
 
     (async () => {
       const hotelMarkers = [];
@@ -309,9 +355,14 @@ const TripResultsPage = () => {
             withCredentials: true,
           });
           if (cancelled) return;
-          const { lat, lng } = response.data;
+          const { lat, lng, name } = response.data;
           if (lat != null && lng != null) {
-            hotelMarkers.push({ lat, lng, title: hotelName, description: 'Overnight stop' });
+            // /locations/venue-coords falls back to the CITY's centroid
+            // (returning the city's own name) when it can't resolve the
+            // specific venue - if that's what came back, this marker is
+            // only as precise as a city centroid, not a real address.
+            const tier = (name || '').toLowerCase() === destinationLower ? 'city' : 'venue';
+            hotelMarkers.push({ lat, lng, title: hotelName, description: 'Overnight stop', tier });
           }
         } catch (error) {
           console.error(`Hotel geocode error for "${hotelName}":`, error);
@@ -323,6 +374,87 @@ const TripResultsPage = () => {
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedPlan, trip?.preferences?.destination]);
+
+  // Road Trip map Phase 2: the ordered list of stops live tracking checks
+  // proximity against - each day's hotel (already day-sorted above) plus
+  // the final destination. Origin is deliberately excluded (the trip
+  // starts there, so it's never a meaningful "you're near a stop" alert).
+  const roadWaypoints = useMemo(() => {
+    if (!isRoadTrip(trip)) return [];
+    const destinationMarker = roadOriginDestMarkers[1]; // [0]=origin, [1]=destination
+    return destinationMarker ? [...roadHotelMarkers, destinationMarker] : [...roadHotelMarkers];
+  }, [trip, roadHotelMarkers, roadOriginDestMarkers]);
+
+  // Clears any active browser geolocation watch on unmount/navigation away -
+  // watchPosition otherwise keeps firing (and keeps the location indicator
+  // active in the browser chrome) after the user has left this page.
+  useEffect(() => {
+    return () => {
+      if (watchIdRef.current != null) {
+        navigator.geolocation.clearWatch(watchIdRef.current);
+      }
+    };
+  }, []);
+
+  // Opt-in only - watchPosition never starts on its own. If permission is
+  // denied (or geolocation isn't supported at all), the map itself is
+  // completely unaffected - this only ever disables the alert feature.
+  const startTripTracking = () => {
+    if (!navigator.geolocation) {
+      setLocationError("This browser doesn't support live location tracking.");
+      return;
+    }
+    setLocationError(null);
+    setNextWaypointIndex(0);
+    setActiveAlert(null);
+    watchIdRef.current = navigator.geolocation.watchPosition(
+      (position) => {
+        setLivePosition({ lat: position.coords.latitude, lng: position.coords.longitude });
+      },
+      (error) => {
+        setLocationError(
+          error.code === error.PERMISSION_DENIED
+            ? 'Location permission denied - the map still works, but nearby-stop alerts need it.'
+            : "Couldn't get your location - live tracking is unavailable right now."
+        );
+        setTripTracking(false);
+      },
+      { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 }
+    );
+    setTripTracking(true);
+  };
+
+  const stopTripTracking = () => {
+    if (watchIdRef.current != null) {
+      navigator.geolocation.clearWatch(watchIdRef.current);
+      watchIdRef.current = null;
+    }
+    setTripTracking(false);
+    setLivePosition(null);
+    setActiveAlert(null);
+  };
+
+  // Checks the live position against ONLY the next unvisited waypoint, not
+  // all of them - waypoints are visited in route order, so there's never a
+  // reason to check ones already passed. See PROXIMITY_THRESHOLD_METERS for
+  // why the radius differs per waypoint.
+  useEffect(() => {
+    if (!tripTracking || !livePosition) return;
+    if (nextWaypointIndex >= roadWaypoints.length) return;
+    if (activeAlert) return; // already showing one - wait for dismiss before checking the next
+
+    const waypoint = roadWaypoints[nextWaypointIndex];
+    const distance = haversineMeters(livePosition.lat, livePosition.lng, waypoint.lat, waypoint.lng);
+    const threshold = PROXIMITY_THRESHOLD_METERS[waypoint.tier] || PROXIMITY_THRESHOLD_METERS.city;
+    if (distance <= threshold) {
+      setActiveAlert(waypoint);
+    }
+  }, [livePosition, tripTracking, nextWaypointIndex, roadWaypoints, activeAlert]);
+
+  const dismissRoadAlert = () => {
+    setActiveAlert(null);
+    setNextWaypointIndex((i) => i + 1);
+  };
 
   // Load this trip's persisted chat history whenever tripId changes, using
   // the same `cancelled` guard as the trip-polling effect above so an
@@ -673,11 +805,66 @@ const TripResultsPage = () => {
                   </h3>
                   <TripMap
                     center={mapCenter}
-                    markers={isRoadTrip(trip) ? [...roadOriginDestMarkers, ...roadHotelMarkers] : mapMarkers}
+                    markers={
+                      isRoadTrip(trip)
+                        ? [
+                            ...roadOriginDestMarkers,
+                            ...roadHotelMarkers,
+                            ...(livePosition
+                              ? [{ lat: livePosition.lat, lng: livePosition.lng, title: 'You are here', description: 'Live position' }]
+                              : []),
+                          ]
+                        : mapMarkers
+                    }
                     route={isRoadTrip(trip) ? roadRoute : null}
                     height="400px"
                     zoom={11}
                   />
+                  {isRoadTrip(trip) && (
+                    <div className="mt-6 pt-6 border-t border-[#E7E5E4]">
+                      <div className="flex items-center justify-between gap-4 flex-wrap">
+                        <p className="text-sm text-[#57534E]">
+                          {tripTracking
+                            ? "Live tracking is on - we'll alert you when you're near a stop."
+                            : "Turn on live tracking to get an alert when you're near a stop on your route."}
+                        </p>
+                        <Button
+                          data-testid="road-trip-tracking-toggle"
+                          onClick={tripTracking ? stopTripTracking : startTripTracking}
+                          className="rounded-xl gap-2 text-white"
+                          style={{
+                            background: tripTracking ? '#57534E' : `linear-gradient(135deg, ${ps.accent}, ${ps.accent}CC)`,
+                          }}
+                        >
+                          {tripTracking ? 'Stop Trip' : 'Start Trip'}
+                        </Button>
+                      </div>
+                      {locationError && (
+                        <p className="text-sm text-red-600 mt-3">{locationError}</p>
+                      )}
+                      {activeAlert && (
+                        <div
+                          data-testid="road-trip-proximity-alert"
+                          className="mt-4 p-4 rounded-xl border flex items-start justify-between gap-4"
+                          style={{ borderColor: ps.accent, background: `${ps.accent}11` }}
+                        >
+                          <p className="text-sm font-medium text-[#1C1917]">
+                            {activeAlert.description === 'Trip end'
+                              ? `You've arrived - ${activeAlert.title} is just ahead!`
+                              : `${activeAlert.title} is nearby - time to check in!`}
+                          </p>
+                          <button
+                            data-testid="road-trip-alert-dismiss"
+                            onClick={dismissRoadAlert}
+                            className="text-sm underline shrink-0"
+                            style={{ color: ps.accent }}
+                          >
+                            Dismiss
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
 
