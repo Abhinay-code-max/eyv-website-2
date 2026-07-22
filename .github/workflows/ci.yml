@@ -123,9 +123,14 @@ jobs:
       #     that are themselves live-server/live-API checks (e.g.
       #     test_*_live in test_group_pricing.py, the live SerpApi check in
       #     test_log_redaction.py).
+      # Tee'd to a file (rather than relying on the step's own log) so it can
+      # be uploaded as a build artifact below - useful when the Actions log
+      # API isn't reachable (no admin token) but artifact downloads still are.
+      # PIPESTATUS[0] preserves pytest's real exit code past the `tee` pipe.
       - name: Run backend unit tests
         working-directory: backend
         run: |
+          set +e
           pytest \
             tests/test_hotel_data_integrity.py \
             tests/test_log_redaction.py \
@@ -134,11 +139,23 @@ jobs:
             tests/backend_test.py \
             tests/test_new_features.py \
             tests/test_rewards_payments.py \
-            -k "not live" -v
+            -k "not live" -v --junit-xml=pytest-results.xml 2>&1 | tee pytest-output.log
+          exit ${PIPESTATUS[0]}
       - name: Show backend server log on failure
         if: failure()
         working-directory: backend
         run: cat uvicorn.log || true
+      - name: Upload backend test output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-test-output
+          path: |
+            backend/pytest-output.log
+            backend/pytest-results.xml
+            backend/uvicorn.log
+          retention-days: 7
+          if-no-files-found: ignore
 
   docker-build:
     runs-on: ubuntu-latest
