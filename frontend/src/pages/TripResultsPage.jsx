@@ -609,6 +609,15 @@ const TripResultsPage = () => {
                     Estimated train fares — not live pricing. Check IRCTC or Rome2rio for current fares.
                   </div>
                 )}
+                {selectedPlan.road_placeholder_pricing && (
+                  <div className="mt-6 pt-6 border-t border-[#E7E5E4] text-sm text-[#57534E] italic">
+                    Estimated fuel + toll cost based on driving distance — not a live quote.{' '}
+                    <a href="https://maps.google.com/" target="_blank" rel="noopener noreferrer"
+                      className="underline not-italic" style={{ color: ps.accent }}>
+                      Check a route planner for current fuel prices and tolls
+                    </a>
+                  </div>
+                )}
                 {selectedPlan.budget_tips?.length > 0 && (
                   <div className="mt-6 pt-6 border-t border-[#E7E5E4]">
                     <h4 className="text-xs uppercase tracking-wider font-medium mb-3" style={{ color: ps.accent }}>
