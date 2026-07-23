@@ -300,6 +300,27 @@ class TripPreferences(BaseModel):
     trip_type: str
     currency: str = "INR"
     budget_mode: bool = True
+    # Road Trip question branch (frontend TripPlannerPage "Road Trip
+    # Preferences" step) - only meaningful when transportation == "Road Trip".
+    # Previously absent from this model, so FastAPI/Pydantic silently dropped
+    # every one of these from every request before generate_single_plan's
+    # road_flavor_block (or any real day-count math) ever saw the user's
+    # actual answers - road_max_driving_hours_per_day always fell back to
+    # its hardcoded default of 8 regardless of what was picked in the wizard.
+    road_drivers: Optional[int] = None
+    road_max_hours_before_break: Optional[int] = None
+    road_break_duration_minutes: Optional[int] = None
+    road_max_driving_hours_per_day: Optional[int] = None
+    road_route_style: Optional[str] = None
+    road_route_avoidances: List[str] = Field(default_factory=list)
+    road_fuel_type: Optional[str] = None
+    road_vehicle_mileage_or_model: Optional[str] = None
+    road_ev_battery_percent: Optional[int] = None
+    road_ev_recharge_preference: Optional[str] = None
+    road_overnight_accommodation: List[str] = Field(default_factory=list)
+    road_food_preference: Optional[str] = None
+    road_route_attractions: List[str] = Field(default_factory=list)
+    road_avoid: List[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _derive_and_validate_num_travelers(self):
