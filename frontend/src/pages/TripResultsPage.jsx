@@ -338,31 +338,71 @@ const TripResultsPage = () => {
       const nb = parseInt(b.replace(/\D/g, ''), 10) || 0;
       return na - nb;
     });
-    const hotelNames = [...new Set(
-      sortedDays.map(([, day]) => day?.accommodation?.name).filter(Boolean)
-    )];
-    if (hotelNames.length === 0) return;
+    // Each stop keeps the day's OWN accommodation.location (the actual
+    // waypoint city the AI planned that night's stay in - e.g. an
+    // intermediate city on the drive, not the trip's final destination),
+    // falling back to the overall destination only when the AI left it
+    // blank. Geocoding every stop against the final destination unconditionally
+    // was the prior bug: a real intermediate-city hotel geocoded as "<hotel
+    // name>, <final destination>" almost always fails that Nominatim lookup
+    // and silently falls back to the destination's own centroid (see
+    // geocode_venue's docstring) - collapsing every waypoint onto the
+    // destination pin instead of tracing the actual route.
+    //
+    // Dedup key is (name, location) TOGETHER, not name alone - confirmed
+    // against a real generated road trip that the AI reuses one anchor
+    // hotel NAME across every night (hotel_constraint forces a single
+    // name/price for the whole plan), while `location` correctly varies
+    // day to day. Deduping on name alone collapsed an entire multi-city
+    // route down to just its first night's city.
+    //
+    // The last day is a checkout-only artifact: the schema requires
+    // accommodation.name/cost even on the day there's no real overnight
+    // stay, so the AI fills location (and type) with the literal string
+    // "N/A" rather than a real city. Skip those instead of geocoding a
+    // placeholder - venue-coords' own fallback chain ends in
+    // amadeus_service.get_destination_coords, which for an unresolvable
+    // string returns a literally RANDOM lat/lng, i.e. exactly the
+    // "nonsense stop" this fix exists to prevent.
+    const isPlaceholder = (v) => !v || v.trim().toLowerCase() === 'n/a';
+    const seen = new Set();
+    const hotelStops = [];
+    for (const [, day] of sortedDays) {
+      const acc = day?.accommodation;
+      if (!acc?.name) continue;
+      const location = acc.location || '';
+      if (isPlaceholder(location) && isPlaceholder(acc.type)) continue;
+      const key = `${acc.name}|${location}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      hotelStops.push({ name: acc.name, location: isPlaceholder(location) ? '' : location });
+    }
+    if (hotelStops.length === 0) return;
 
     let cancelled = false;
-    const destinationLower = (trip.preferences.destination || '').toLowerCase();
 
     (async () => {
       const hotelMarkers = [];
-      for (const hotelName of hotelNames) {
+      for (const { name: hotelName, location } of hotelStops) {
+        const city = location || trip.preferences.destination;
         try {
           const response = await axios.get(`${API_URL}/locations/venue-coords`, {
-            params: { name: hotelName, city: trip.preferences.destination },
+            params: { name: hotelName, city },
             withCredentials: true,
           });
           if (cancelled) return;
           const { lat, lng, name } = response.data;
           if (lat != null && lng != null) {
             // /locations/venue-coords falls back to the CITY's centroid
-            // (returning the city's own name) when it can't resolve the
-            // specific venue - if that's what came back, this marker is
+            // (returning the queried city's own name) when it can't resolve
+            // the specific venue - if that's what came back, this marker is
             // only as precise as a city centroid, not a real address.
-            const tier = (name || '').toLowerCase() === destinationLower ? 'city' : 'venue';
-            hotelMarkers.push({ lat, lng, title: hotelName, description: 'Overnight stop', tier });
+            const tier = (name || '').toLowerCase() === (city || '').toLowerCase() ? 'city' : 'venue';
+            // Description carries the day's real city - every stop otherwise
+            // shows the same reused hotel name (see the dedup comment above),
+            // so without this every pin on the map would look identical.
+            const description = location ? `Overnight stop — ${location}` : 'Overnight stop';
+            hotelMarkers.push({ lat, lng, title: hotelName, description, tier });
           }
         } catch (error) {
           console.error(`Hotel geocode error for "${hotelName}":`, error);
