@@ -50,6 +50,10 @@ jobs:
       # security fix) - any explicit value satisfies it since these tests
       # never make a cross-origin request.
       CORS_ORIGINS: http://localhost:3000
+      # server.py also raises at import time if this is unset (signs
+      # short-lived wallet download URLs) - any value works here, it just
+      # needs to be present and stable for the duration of the job.
+      WALLET_URL_SIGNING_SECRET: ci-placeholder-wallet-signing-secret-not-a-real-secret
       # OpenAI/Gemini clients are lazy singletons (_get_openai_client /
       # _get_gemini_client in server.py) - not required just to import
       # server.py. backend_test.py's real-Gemini-touching tests
@@ -138,6 +142,7 @@ jobs:
             tests/test_plan_generation_crash.py \
             tests/backend_test.py \
             tests/test_new_features.py \
+            tests/test_auth_security.py \
             tests/test_rewards_payments.py \
             -k "not live" -v --junit-xml=pytest-results.xml 2>&1 | tee pytest-output.log
           exit ${PIPESTATUS[0]}

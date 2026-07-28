@@ -8,6 +8,10 @@ import logging
 import math
 import subprocess
 import functools
+import hashlib
+import hmac
+import io
+import time
 from pathlib import Path
 
 # Must run before importing any service module below - several of them read
@@ -28,6 +32,7 @@ from google import genai
 from google.genai import types as genai_types
 import stripe
 import sentry_sdk
+from PIL import Image
 from pythonjsonlogger.json import JsonFormatter
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from services import amadeus_service, storage_service, rewards_service, locations_service
@@ -105,6 +110,45 @@ def _resolve_cors_origins() -> List[str]:
 
 
 CORS_ORIGINS = _resolve_cors_origins()
+
+
+def _resolve_wallet_download_secret() -> str:
+    """Signs short-lived wallet file download URLs (item id + expiry) so the
+    download route can validate a request without needing the session
+    cookie/token on it - deliberately a separate secret from session tokens
+    (session tokens are opaque random values with no secret key at all) so a
+    leaked download link can never be used to forge a session or vice versa.
+    Required, not optional - unlike ADMIN_API_KEY-gated features, wallet
+    downloads have no "disabled" fallback mode, and a per-process random
+    fallback would make signed URLs fail validation on every other worker/
+    restart. Set once in backend/.env locally and in Railway's service
+    variables for deploys, and never rotate it without expecting all
+    in-flight download links to invalidate."""
+    secret = os.environ.get('WALLET_URL_SIGNING_SECRET')
+    if not secret:
+        raise RuntimeError(
+            "WALLET_URL_SIGNING_SECRET must be set - it signs short-lived "
+            "wallet file download URLs. Set it in backend/.env for local dev "
+            "and in Railway's service variables for deploys."
+        )
+    return secret
+
+
+WALLET_URL_SIGNING_SECRET = _resolve_wallet_download_secret()
+WALLET_DOWNLOAD_URL_TTL_SECONDS = 180
+
+
+def _hash_session_token(token: str) -> str:
+    """Session tokens are already high-entropy random values (uuid4().hex),
+    so a plain SHA-256 hash is sufficient here - no need for slow/salted
+    hashing (bcrypt etc.) meant for low-entropy human passwords."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _sign_wallet_download(item_id: str, expires: int) -> str:
+    message = f"{item_id}:{expires}".encode("utf-8")
+    return hmac.new(WALLET_URL_SIGNING_SECRET.encode("utf-8"), message, hashlib.sha256).hexdigest()
+
 
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
@@ -270,10 +314,11 @@ class User(BaseModel):
 
 class UserSession(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    session_token: str
+    session_id: str
     user_id: str
     expires_at: datetime
     created_at: datetime
+    user_agent: Optional[str] = None
 
 class SessionExchangeRequest(BaseModel):
     session_id: str
@@ -357,45 +402,55 @@ class ChatMessage(BaseModel):
     selected_tier: Optional[str] = None
 
 # Auth Helper
-async def get_current_user(request: Request) -> User:
+async def _get_current_session(request: Request) -> Dict[str, Any]:
+    """Resolves the raw session document for the request's session token.
+    Split out from get_current_user() so session-management endpoints (list/
+    revoke) can get at session_id/expires_at/etc. without a second lookup."""
     session_token = request.cookies.get("session_token")
     if not session_token:
         auth_header = request.headers.get("Authorization")
         if auth_header and auth_header.startswith("Bearer "):
             session_token = auth_header.replace("Bearer ", "")
-    
+
     if not session_token:
         raise HTTPException(status_code=401, detail="Not authenticated")
-    
+
+    token_hash = _hash_session_token(session_token)
     session_doc = await db.user_sessions.find_one(
-        {"session_token": session_token},
+        {"session_token": token_hash},
         {"_id": 0}
     )
-    
+
     if not session_doc:
         raise HTTPException(status_code=401, detail="Invalid session")
-    
+
     expires_at = session_doc["expires_at"]
     if isinstance(expires_at, str):
         expires_at = datetime.fromisoformat(expires_at)
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
-    
+
     if expires_at < datetime.now(timezone.utc):
-        await db.user_sessions.delete_one({"session_token": session_token})
+        await db.user_sessions.delete_one({"session_token": token_hash})
         raise HTTPException(status_code=401, detail="Session expired")
-    
+
+    return session_doc
+
+
+async def get_current_user(request: Request) -> User:
+    session_doc = await _get_current_session(request)
+
     user_doc = await db.users.find_one(
         {"user_id": session_doc["user_id"]},
         {"_id": 0}
     )
-    
+
     if not user_doc:
         raise HTTPException(status_code=404, detail="User not found")
-    
+
     if isinstance(user_doc['created_at'], str):
         user_doc['created_at'] = datetime.fromisoformat(user_doc['created_at'])
-    
+
     return User(**user_doc)
 
 
@@ -505,7 +560,7 @@ async def google_callback(code: Optional[str] = None, state: Optional[str] = Non
 
 
 @api_router.post("/auth/session")
-async def exchange_session(request: SessionExchangeRequest, response: Response):
+async def exchange_session(request: SessionExchangeRequest, response: Response, http_request: Request):
     try:
         ticket_doc = await db.oauth_tickets.find_one(
             {"ticket": request.session_id}, {"_id": 0}
@@ -548,13 +603,21 @@ async def exchange_session(request: SessionExchangeRequest, response: Response):
         session_token = uuid.uuid4().hex
         expires_at = datetime.now(timezone.utc) + timedelta(days=7)
 
-        await db.user_sessions.delete_many({"user_id": user_id})
-
+        # Each login inserts its own session rather than deleting the user's
+        # existing ones - logging in on a phone shouldn't kill a laptop
+        # session. Sessions are only ever removed individually now: by
+        # /auth/logout (this token only), /auth/sessions/{id} (explicit
+        # revoke), or the TTL index once expires_at passes.
         session_doc = {
-            "session_token": session_token,
+            "session_id": uuid.uuid4().hex,
+            # Plaintext tokens in this collection would let anyone with DB
+            # read access impersonate any live session - store only a
+            # SHA-256 hash and compare hashes on every lookup instead.
+            "session_token": _hash_session_token(session_token),
             "user_id": user_id,
             "expires_at": expires_at.isoformat(),
-            "created_at": datetime.now(timezone.utc).isoformat()
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "user_agent": http_request.headers.get("user-agent"),
         }
         await db.user_sessions.insert_one(session_doc)
 
@@ -589,11 +652,44 @@ async def get_me(request: Request):
 @api_router.post("/auth/logout")
 async def logout(request: Request, response: Response):
     session_token = request.cookies.get("session_token")
+    if not session_token:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            session_token = auth_header.replace("Bearer ", "")
     if session_token:
-        await db.user_sessions.delete_one({"session_token": session_token})
-    
+        # Only this one session/device - not db.user_sessions.delete_many,
+        # which would also sign the user out everywhere else.
+        await db.user_sessions.delete_one({"session_token": _hash_session_token(session_token)})
+
     response.delete_cookie(key="session_token", path="/")
     return {"message": "Logged out successfully"}
+
+
+@api_router.get("/auth/sessions")
+async def list_sessions(request: Request):
+    """All of the current user's active sessions (e.g. phone + laptop both
+    logged in at once) - never includes the token hash itself."""
+    current_session = await _get_current_session(request)
+    docs = await db.user_sessions.find(
+        {"user_id": current_session["user_id"]},
+        {"_id": 0, "session_token": 0}
+    ).sort("created_at", -1).to_list(100)
+    for doc in docs:
+        doc["is_current"] = doc.get("session_id") == current_session.get("session_id")
+    return {"sessions": docs}
+
+
+@api_router.delete("/auth/sessions/{session_id}")
+async def revoke_session(session_id: str, request: Request):
+    """Revoke one specific session (e.g. a lost/stolen device) without
+    touching any of the user's other active sessions."""
+    current_session = await _get_current_session(request)
+    result = await db.user_sessions.delete_one(
+        {"session_id": session_id, "user_id": current_session["user_id"]}
+    )
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"message": "Session revoked"}
 
 TRIP_PLAN_TYPES = ("Budget", "Premium", "Luxury")
 
@@ -2342,6 +2438,41 @@ class WalletItem(BaseModel):
     created_at: str
 
 
+# Only what the frontend upload widget actually offers (accept=".pdf,.jpg,
+# .jpeg,.png,.gif,.webp" in WalletPage.jsx) - never trust the client's
+# Content-Type header for this: an HTML file uploaded with a spoofed
+# "image/jpeg" header would otherwise get served back with that same
+# spoofed type later, a stored-XSS foothold if anything ever renders it
+# inline. The extension used for GridFS's storage path is derived from the
+# sniffed type below too, not the client-supplied filename.
+_WALLET_MIME_TO_EXT = {
+    "image/jpeg": "jpg", "image/png": "png", "image/gif": "gif",
+    "image/webp": "webp", "application/pdf": "pdf",
+}
+_WALLET_PDF_MAGIC = b"%PDF-"
+_PILLOW_FORMAT_TO_MIME = {"JPEG": "image/jpeg", "PNG": "image/png", "GIF": "image/gif", "WEBP": "image/webp"}
+
+
+def _sniff_wallet_content_type(data: bytes) -> Optional[str]:
+    """Identify the real file type from its bytes, never the client-supplied
+    Content-Type. PDFs are checked by header magic bytes (the same signature
+    every PDF reader relies on); images are opened with Pillow, which parses
+    real header structure rather than trusting an extension - Image.open()
+    already raises for anything that isn't a genuine image of a format it
+    knows, and .verify() additionally checks the file isn't truncated/
+    corrupt. Returns None (rejected) for anything else, including a
+    same-named-but-wrong-content file like an HTML page saved as "x.jpg"."""
+    if data.startswith(_WALLET_PDF_MAGIC):
+        return "application/pdf"
+    try:
+        img = Image.open(io.BytesIO(data))
+        fmt = img.format
+        img.verify()
+    except Exception:
+        return None
+    return _PILLOW_FORMAT_TO_MIME.get(fmt)
+
+
 @api_router.post("/wallet/upload")
 async def upload_wallet_item(
     request: Request,
@@ -2352,24 +2483,27 @@ async def upload_wallet_item(
     trip_id: Optional[str] = None
 ):
     user = await get_current_user(request)
-    
-    ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else "bin"
-    if ext not in storage_service.MIME_TYPES:
-        ext = "bin"
-    
-    content_type = file.content_type or storage_service.MIME_TYPES.get(ext, "application/octet-stream")
-    storage_path = storage_service.build_path(user.user_id, ext)
+
     data = await file.read()
-    
+
     if len(data) > 10 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="File too large (max 10MB)")
-    
+
+    content_type = _sniff_wallet_content_type(data)
+    if content_type not in _WALLET_MIME_TO_EXT:
+        raise HTTPException(
+            status_code=415,
+            detail="Unsupported file type - only JPEG, PNG, GIF, WEBP images and PDF are accepted",
+        )
+
+    storage_path = storage_service.build_path(user.user_id, _WALLET_MIME_TO_EXT[content_type])
+
     try:
         result = await storage_service.put_object(storage_path, data, content_type)
     except Exception as e:
         logger.error(f"Storage upload error: {e}")
         raise HTTPException(status_code=500, detail="File upload failed")
-    
+
     item_id = f"wallet_{uuid.uuid4().hex[:12]}"
     item_doc = {
         "item_id": item_id,
@@ -2404,43 +2538,63 @@ async def list_wallet_items(request: Request, category: Optional[str] = None, tr
     return {"items": items}
 
 
-@api_router.get("/wallet/{item_id}/download")
-async def download_wallet_item(item_id: str, request: Request, auth: Optional[str] = Query(None)):
-    # Support both cookie auth and query param auth (for direct <img> tag access)
-    user = None
-    
-    if auth:
-        # Validate session_token from query param
-        session_doc = await db.user_sessions.find_one(
-            {"session_token": auth}, {"_id": 0}
-        )
-        if session_doc:
-            user_doc = await db.users.find_one({"user_id": session_doc["user_id"]}, {"_id": 0})
-            if user_doc:
-                if isinstance(user_doc.get("created_at"), str):
-                    user_doc["created_at"] = datetime.fromisoformat(user_doc["created_at"])
-                user = User(**user_doc)
-    
-    if not user:
-        user = await get_current_user(request)
-    
+@api_router.get("/wallet/{item_id}/download-url")
+async def get_wallet_download_url(item_id: str, request: Request):
+    """Mints a short-lived signed download link for this item. Session-
+    authenticated (ownership is checked here, once) so the actual download
+    route below never needs the session cookie/token at all - it previously
+    accepted the raw session_token as a URL query param, which leaks into
+    server logs, browser history, and any proxy in the path. The signature
+    is scoped to this specific item_id + expiry, so it can't be replayed for
+    a different item or after it expires."""
+    user = await get_current_user(request)
     item = await db.wallet_items.find_one(
         {"item_id": item_id, "user_id": user.user_id, "is_deleted": False},
         {"_id": 0}
     )
     if not item:
         raise HTTPException(status_code=404, detail="Item not found")
-    
+
+    expires = int(time.time()) + WALLET_DOWNLOAD_URL_TTL_SECONDS
+    signature = _sign_wallet_download(item_id, expires)
+    return {"item_id": item_id, "expires": expires, "signature": signature}
+
+
+@api_router.get("/wallet/{item_id}/download")
+async def download_wallet_item(
+    item_id: str,
+    expires: int = Query(...),
+    signature: str = Query(...),
+):
+    if int(time.time()) > expires:
+        raise HTTPException(status_code=401, detail="Download link expired")
+    if not hmac.compare_digest(_sign_wallet_download(item_id, expires), signature):
+        raise HTTPException(status_code=401, detail="Invalid download link")
+
+    item = await db.wallet_items.find_one(
+        {"item_id": item_id, "is_deleted": False},
+        {"_id": 0}
+    )
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+
     try:
         data, content_type = await storage_service.get_object(item["file_path"])
     except Exception as e:
         logger.error(f"Storage download error: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve file")
-    
+
+    # attachment (not inline) + nosniff so a mis-classified or since-changed
+    # file can never be rendered inline by the browser, even as a
+    # defense-in-depth backstop to the upload-time content sniffing above.
+    safe_filename = os.path.basename(item["original_filename"]).replace('"', "'").replace("\r", "").replace("\n", "")
     return Response(
         content=data,
         media_type=item.get("content_type", content_type),
-        headers={"Content-Disposition": f'inline; filename="{item["original_filename"]}"'}
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe_filename}"',
+            "X-Content-Type-Options": "nosniff",
+        }
     )
 
 

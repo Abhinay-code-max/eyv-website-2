@@ -98,10 +98,12 @@ def _seed_session(user_id, session_token, premium=False):
         if premium:
             user_doc["current_period_end"] = (now + timedelta(days=30)).isoformat()
         await db.users.update_one({"user_id": user_id}, {"$set": user_doc}, upsert=True)
+        token_hash = server._hash_session_token(session_token)
         await db.user_sessions.update_one(
-            {"session_token": session_token},
+            {"session_token": token_hash},
             {"$set": {
-                "session_token": session_token, "user_id": user_id,
+                "session_token": token_hash, "user_id": user_id,
+                "session_id": token_hash[:32],
                 "expires_at": (now + timedelta(days=7)).isoformat(),
                 "created_at": now.isoformat(),
             }},
@@ -131,7 +133,9 @@ def _setup_and_teardown():
     async def _cleanup():
         db = _db()
         await db.users.delete_many({"user_id": {"$in": [FREE_USER_ID, PREMIUM_USER_ID]}})
-        await db.user_sessions.delete_many({"session_token": {"$in": [FREE_SESSION, PREMIUM_SESSION]}})
+        await db.user_sessions.delete_many({"session_token": {"$in": [
+            server._hash_session_token(FREE_SESSION), server._hash_session_token(PREMIUM_SESSION),
+        ]}})
         await db.generation_quota.delete_many({"user_id": {"$in": [FREE_USER_ID, PREMIUM_USER_ID]}})
     _run(_cleanup())
 

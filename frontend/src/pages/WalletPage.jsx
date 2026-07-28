@@ -96,8 +96,15 @@ const WalletPage = ({ user }) => {
   const handlePreview = async (item) => {
     setPreviewItem(item);
     try {
+      // Mint a short-lived signed download link first (session-authenticated),
+      // then fetch the actual file through it - the download route itself no
+      // longer accepts the session cookie/token at all, only a valid signature.
+      const { data: link } = await axios.get(`${API_URL}/wallet/${item.item_id}/download-url`, {
+        withCredentials: true,
+      });
       const response = await axios.get(`${API_URL}/wallet/${item.item_id}/download`, {
-        withCredentials: true, responseType: 'blob',
+        params: { expires: link.expires, signature: link.signature },
+        responseType: 'blob',
       });
       setPreviewUrl(URL.createObjectURL(response.data));
     } catch (error) { console.error('Preview error:', error); alert('Failed to load preview'); }

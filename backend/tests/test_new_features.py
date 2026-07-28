@@ -232,11 +232,22 @@ def test_wallet_upload_unauthorized():
     assert r.status_code == 401
 
 
+def _tiny_png_bytes():
+    """A genuine 1x1 PNG - the wallet upload endpoint now sniffs real file
+    content (Pillow-decodes it) rather than trusting the client-supplied
+    Content-Type/extension, so tests need real image bytes, not a renamed
+    text file, to get past it."""
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (1, 1), color=(200, 100, 50)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
 @pytest.fixture(scope="module")
 def uploaded_wallet_item():
     """Upload a file used by subsequent tests"""
-    content = b"TEST WALLET FILE CONTENT - boarding pass dummy"
-    files = {"file": ("test_boarding.txt", io.BytesIO(content), "text/plain")}
+    content = _tiny_png_bytes()
+    files = {"file": ("test_boarding.png", io.BytesIO(content), "image/png")}
     # Backend reads category/title/description as QUERY params (not form fields)
     params = {"category": "boarding_pass", "title": "TEST_Boarding Pass",
               "description": "Pytest upload"}
@@ -253,9 +264,19 @@ def test_wallet_upload_success(uploaded_wallet_item):
     assert item["item_id"].startswith("wallet_")
     assert item["category"] == "boarding_pass"
     assert item["title"] == "TEST_Boarding Pass"
-    assert item["original_filename"] == "test_boarding.txt"
+    assert item["original_filename"] == "test_boarding.png"
+    assert item["content_type"] == "image/png"
     assert "_id" not in item
     assert item["size"] > 0
+
+
+def test_wallet_upload_rejects_spoofed_content_type():
+    """A text file dressed up as a JPEG (spoofed filename + Content-Type
+    header) must be rejected - the server sniffs actual content, it never
+    trusts either of those client-supplied values."""
+    files = {"file": ("evil.jpg", io.BytesIO(b"<script>alert(1)</script>"), "image/jpeg")}
+    r = requests.post(f"{BASE_URL}/api/wallet/upload", files=files, headers=AUTH_HEADER, timeout=60)
+    assert r.status_code == 415
 
 
 def test_wallet_list(uploaded_wallet_item):
@@ -273,23 +294,74 @@ def test_wallet_list_category_filter(uploaded_wallet_item):
     assert all(it["category"] == "boarding_pass" for it in items)
 
 
+def _mint_download_link(item_id):
+    r = requests.get(f"{BASE_URL}/api/wallet/{item_id}/download-url", headers=AUTH_HEADER, timeout=60)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
 def test_wallet_download(uploaded_wallet_item):
     item, original = uploaded_wallet_item
-    r = requests.get(f"{BASE_URL}/api/wallet/{item['item_id']}/download",
-                     headers=AUTH_HEADER, timeout=60)
+    link = _mint_download_link(item["item_id"])
+    r = requests.get(
+        f"{BASE_URL}/api/wallet/{item['item_id']}/download",
+        params={"expires": link["expires"], "signature": link["signature"]},
+        timeout=60,
+    )
     assert r.status_code == 200, r.text
     assert r.content == original
+    assert r.headers["content-disposition"].startswith("attachment;")
+    assert r.headers["x-content-type-options"] == "nosniff"
 
 
-def test_wallet_download_query_auth(uploaded_wallet_item):
-    """Test the ?auth= query param auth path used by <img> tags"""
-    item, original = uploaded_wallet_item
+def test_wallet_download_no_signature_rejected():
+    """The download route no longer accepts the session cookie/token at
+    all (not as a cookie, not as ?auth=) - only a valid signature+expiry,
+    since a raw session token in a URL leaks into logs/history/proxies."""
+    r = requests.get(f"{BASE_URL}/api/wallet/some_item/download", timeout=60)
+    assert r.status_code == 422  # expires/signature are required query params
+
+
+def test_wallet_download_tampered_signature_rejected(uploaded_wallet_item):
+    item, _ = uploaded_wallet_item
+    link = _mint_download_link(item["item_id"])
     r = requests.get(
-        f"{BASE_URL}/api/wallet/{item['item_id']}/download?auth={SESSION_TOKEN}",
-        timeout=60
+        f"{BASE_URL}/api/wallet/{item['item_id']}/download",
+        params={"expires": link["expires"], "signature": "0" * 64},
+        timeout=60,
     )
-    assert r.status_code == 200
-    assert r.content == original
+    assert r.status_code == 401
+
+
+def test_wallet_download_expired_link_rejected(uploaded_wallet_item):
+    item, _ = uploaded_wallet_item
+    link = _mint_download_link(item["item_id"])
+    r = requests.get(
+        f"{BASE_URL}/api/wallet/{item['item_id']}/download",
+        # Same signature but an expiry moved into the past - must fail even
+        # with an otherwise-valid signature for a *different* expires value.
+        params={"expires": link["expires"] - 100000, "signature": link["signature"]},
+        timeout=60,
+    )
+    assert r.status_code == 401
+
+
+def test_wallet_download_url_wrong_owner_rejected(uploaded_wallet_item):
+    """A second user must not be able to mint a download link for someone
+    else's wallet item."""
+    other_user = "test_new_features_other_user"
+    other_session = "test_new_features_other_session"
+    seed_session(other_user, other_session)
+    try:
+        item, _ = uploaded_wallet_item
+        r = requests.get(
+            f"{BASE_URL}/api/wallet/{item['item_id']}/download-url",
+            headers={"Authorization": f"Bearer {other_session}"},
+            timeout=60,
+        )
+        assert r.status_code == 404
+    finally:
+        delete_session(other_user, other_session)
 
 
 def test_wallet_delete(uploaded_wallet_item):

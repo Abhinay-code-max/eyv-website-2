@@ -83,10 +83,12 @@ def _seed_session(user_id, session_token):
             }},
             upsert=True,
         )
+        token_hash = server._hash_session_token(session_token)
         await db.user_sessions.update_one(
-            {"session_token": session_token},
+            {"session_token": token_hash},
             {"$set": {
-                "session_token": session_token, "user_id": user_id,
+                "session_token": token_hash, "user_id": user_id,
+                "session_id": token_hash[:32],
                 "expires_at": (now + timedelta(days=7)).isoformat(),
                 "created_at": now.isoformat(),
             }},
@@ -160,7 +162,9 @@ def _setup_and_teardown():
     async def _cleanup():
         db = _db()
         await db.users.delete_many({"user_id": {"$in": ALL_TEST_USER_IDS}})
-        await db.user_sessions.delete_many({"session_token": {"$in": ALL_TEST_SESSIONS}})
+        await db.user_sessions.delete_many({"session_token": {"$in": [
+            server._hash_session_token(s) for s in ALL_TEST_SESSIONS
+        ]}})
         await db.generation_quota.delete_many({"user_id": {"$in": ALL_TEST_USER_IDS}})
         await db.trips.delete_many({"user_id": {"$in": ALL_TEST_USER_IDS}})
     _run(_cleanup())
