@@ -693,6 +693,15 @@ async def revoke_session(session_id: str, request: Request):
 
 TRIP_PLAN_TYPES = ("Budget", "Premium", "Luxury")
 
+# Sentinel distinguishing "caller didn't pass shared raw search results,
+# fetch them yourself" from "caller passed None because this trip has no
+# flight leg (train/cruise/road)" - both are falsy, but only the first
+# should trigger a fetch. Defined here (not next to the functions that
+# default to it, further down) because default argument values are
+# evaluated at `def` time - _generate_and_save_tier below needs this name
+# to already exist.
+_NOT_FETCHED = object()
+
 
 def _placeholder_plan(plan_type: str, currency: str, currency_symbol: str) -> Dict[str, Any]:
     """Shape a tier's entry takes in the trips.plans array from the moment
@@ -735,11 +744,23 @@ def _spawn_background_task(coro) -> None:
     task.add_done_callback(_on_done)
 
 
-async def _generate_and_save_tier(trip_id: str, user_id: str, plan_type: str, preferences_dict: Dict, plan_index: int) -> None:
+async def _generate_and_save_tier(
+    trip_id: str, user_id: str, plan_type: str, preferences_dict: Dict, plan_index: int,
+    raw_flights: Any = _NOT_FETCHED, raw_hotels: Any = _NOT_FETCHED,
+) -> None:
     """Generate one tier and write only its slot in the trip's plans array -
     the same single-index update the regenerate endpoint uses, so a tier
     finishing here is indistinguishable from one finishing via regenerate."""
-    plan = await generate_single_plan(preferences_dict, plan_type, trip_id, user_id)
+    # Only forwarded when the caller actually did a shared fetch - callers
+    # that don't pass these (e.g. a direct/test call with just the first 5
+    # positional args) get exactly the pre-existing generate_single_plan(...)
+    # call shape, unchanged.
+    shared_kwargs: Dict[str, Any] = {}
+    if raw_flights is not _NOT_FETCHED:
+        shared_kwargs["raw_flights"] = raw_flights
+    if raw_hotels is not _NOT_FETCHED:
+        shared_kwargs["raw_hotels"] = raw_hotels
+    plan = await generate_single_plan(preferences_dict, plan_type, trip_id, user_id, **shared_kwargs)
     await db.trips.update_one(
         {"trip_id": trip_id, "user_id": user_id},
         {"$set": {f"plans.{plan_index}": plan, "updated_at": datetime.now(timezone.utc).isoformat()}},
@@ -787,8 +808,34 @@ async def generate_trip_plans(preferences: TripPreferences, request: Request):
     }
     await db.trips.insert_one(saved_trip)
 
+    # Fetch flight/hotel search results ONCE here, shared by all three tiers
+    # below - each tier's anchor price is a SELECTION from this single
+    # response (cheapest/median/most-expensive hotel; cheapest/direct/
+    # fastest flight - see _select_tier_hotel / select_anchor_flight), not a
+    # fresh search of its own. Previously each of the three background tasks
+    # below called _fetch_anchor_pricing independently, tripling real Duffel/
+    # SerpApi calls for parameters that never varied between tiers.
+    is_train, is_cruise, is_road = _transport_mode_flags(preferences_dict)
+    raw_hotels = await _search_hotels_cached(
+        preferences_dict.get("destination", ""),
+        preferences_dict.get("departure_date", ""),
+        preferences_dict.get("return_date", ""),
+        ROOM_OCCUPANCY, "INR", user.user_id,
+    )
+    raw_flights = None
+    if not (is_train or is_cruise or is_road):
+        raw_flights = await _search_flights_cached(
+            preferences_dict.get("starting_location", ""),
+            preferences_dict.get("destination", ""),
+            preferences_dict.get("departure_date", ""),
+            1, user.user_id,
+        )
+
     for plan_index, plan_type in enumerate(TRIP_PLAN_TYPES):
-        _spawn_background_task(_generate_and_save_tier(trip_id, user.user_id, plan_type, preferences_dict, plan_index))
+        _spawn_background_task(_generate_and_save_tier(
+            trip_id, user.user_id, plan_type, preferences_dict, plan_index,
+            raw_flights=raw_flights, raw_hotels=raw_hotels,
+        ))
 
     return {"trip_id": trip_id, "plans": placeholder_plans}
 
@@ -857,6 +904,16 @@ def _room_count(num_travelers: int, occupancy: int = ROOM_OCCUPANCY) -> int:
     return max(1, math.ceil(num_travelers / occupancy))
 
 
+def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    """Great-circle distance between two coordinates, in km."""
+    r = 6371.0
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lng2 - lng1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    return r * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
 async def _geocode_place(place: str) -> Optional[Dict[str, float]]:
     """Geocode a place name using the same fallback chain as the
     /destinations/{destination}/coords endpoint: curated list + Nominatim
@@ -866,16 +923,6 @@ async def _geocode_place(place: str) -> Optional[Dict[str, float]]:
     if not coords:
         coords = amadeus_service.get_destination_coords(place)
     return coords
-
-
-def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
-    """Great-circle distance between two coordinates, in km."""
-    r = 6371.0
-    phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlambda = math.radians(lng2 - lng1)
-    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
-    return r * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
 # Neither Ignav (flights) nor SerpApi (hotels) exposes separate child/senior
@@ -1050,14 +1097,61 @@ PLAN_RESPONSE_SCHEMA = {
 }
 
 
-async def _fetch_anchor_pricing(preferences: Dict, plan_type: str, user_id: str, fare_units: float, room_count: int) -> Dict[str, Any]:
+def _transport_mode_flags(preferences: Dict) -> tuple:
+    """Train/cruise/road/flight are mutually exclusive - shared by
+    generate_trip_plans (deciding whether a flight search is even needed
+    before the shared fetch) and _fetch_anchor_pricing (deciding which
+    pricing branch to run)."""
+    transport_mode = preferences.get("transportation", "flight").lower()
+    return "train" in transport_mode, "cruise" in transport_mode, "road" in transport_mode
+
+
+async def _search_flights_cached(origin: str, destination: str, departure_date: str, travelers: int, user_id: str) -> List[Dict]:
+    """The one place anchor-pricing hits Ignav for flights. Checks the
+    short-TTL search cache first (see price_cache_service) so a second
+    generation with the same route/date/traveler count within the TTL
+    window costs zero real provider calls - usage is only logged on an
+    actual cache miss, so provider_usage stays an accurate count of real
+    calls, not attempted ones."""
+    params = {"origin": origin, "destination": destination, "departure_date": departure_date, "travelers": travelers}
+    cached = await price_cache_service.get_cached_search(db, "flight", params)
+    if cached is not None:
+        return cached
+    flights = await duffel_service.search_flights(origin, destination, departure_date, travelers=travelers)
+    await usage_service.log_usage(db, "duffel", user_id=user_id, meta={"context": "generate_single_plan"})
+    await price_cache_service.cache_search_response(db, "flight", params, flights)
+    return flights
+
+
+async def _search_hotels_cached(destination: str, check_in: str, check_out: str, travelers: int, currency: str, user_id: str) -> List[Dict]:
+    """Same caching contract as _search_flights_cached above, for SerpApi
+    hotel search."""
+    params = {"destination": destination, "check_in": check_in, "check_out": check_out, "travelers": travelers, "currency": currency}
+    cached = await price_cache_service.get_cached_search(db, "hotel", params)
+    if cached is not None:
+        return cached
+    hotels = await serpapi_hotels_service.search_hotels(destination, check_in, check_out, travelers=travelers, currency=currency)
+    await usage_service.log_usage(db, "serpapi", user_id=user_id, meta={"context": "generate_single_plan"})
+    await price_cache_service.cache_search_response(db, "hotel", params, hotels)
+    return hotels
+
+
+async def _fetch_anchor_pricing(
+    preferences: Dict, plan_type: str, user_id: str, fare_units: float, room_count: int,
+    raw_flights: Any = _NOT_FETCHED, raw_hotels: Any = _NOT_FETCHED,
+) -> Dict[str, Any]:
     """Fetch real flight/train + hotel anchor prices for one tier. Split out
     of generate_single_plan so a single-tier regenerate can reuse a
     previously-fetched anchor (see the "anchor" param there) instead of
-    hitting Duffel/SerpApi again for tiers that already anchored fine."""
-    transport_mode = preferences.get("transportation", "flight").lower()
-    is_train = "train" in transport_mode
-    is_road = "road" in transport_mode
+    hitting Duffel/SerpApi again for tiers that already anchored fine.
+
+    raw_flights/raw_hotels: pre-fetched, not-yet-tier-selected search
+    results shared across all three tiers of one generation (see
+    generate_trip_plans) - passing these turns Budget/Premium/Luxury from
+    three independent searches into three SELECTIONS from the same single
+    search. Left at the _NOT_FETCHED sentinel, this fetches for itself
+    (single-tier callers like regenerate-without-a-cached-anchor)."""
+    is_train, is_cruise, is_road = _transport_mode_flags(preferences)
 
     flight_price = 0
     flight_airline = ""
@@ -1165,14 +1259,14 @@ async def _fetch_anchor_pricing(preferences: Dict, plan_type: str, user_id: str,
             # ~4x the travelers=1 fare), so if we passed num_travelers here we'd double it
             # by multiplying again below. Querying at 1 gives us a clean per-seat fare that
             # WE scale, the same way train_price already does with its fixed base rate.
-            af = await duffel_service.get_anchor_flight(
-                preferences.get("starting_location", ""),
-                preferences.get("destination", ""),
-                preferences.get("departure_date", ""),
-                travelers=1,
-                preference=flight_pref,
-            )
-            await usage_service.log_usage(db, "duffel", user_id=user_id, meta={"context": "generate_single_plan"})
+            if raw_flights is _NOT_FETCHED:
+                raw_flights = await _search_flights_cached(
+                    preferences.get("starting_location", ""),
+                    preferences.get("destination", ""),
+                    preferences.get("departure_date", ""),
+                    1, user_id,
+                )
+            af = duffel_service.select_anchor_flight(raw_flights or [], preference=flight_pref)
             if af:
                 # Each traveler needs their own seat/fare, discounted by age
                 # (Ignav has no separate child/senior fare - see _fare_units).
@@ -1195,14 +1289,14 @@ async def _fetch_anchor_pricing(preferences: Dict, plan_type: str, user_id: str,
         # multiplying by room_count below would double-count on top of whatever the
         # provider already adjusted. Querying at ROOM_OCCUPANCY gives a stable per-room
         # rate that WE scale by room count, which we fully control.
-        hotel_results = await serpapi_hotels_service.search_hotels(
-            preferences.get("destination", ""),
-            preferences.get("departure_date", ""),
-            preferences.get("return_date", ""),
-            travelers=ROOM_OCCUPANCY,
-            currency="INR",
-        )
-        await usage_service.log_usage(db, "serpapi", user_id=user_id, meta={"context": "generate_single_plan"})
+        if raw_hotels is _NOT_FETCHED:
+            raw_hotels = await _search_hotels_cached(
+                preferences.get("destination", ""),
+                preferences.get("departure_date", ""),
+                preferences.get("return_date", ""),
+                ROOM_OCCUPANCY, "INR", user_id,
+            )
+        hotel_results = raw_hotels
         if hotel_results:
             # hotel_results is already price-sorted ascending by the service -
             # SELECT the tier's hotel from real data, never edit its fields.
@@ -1248,7 +1342,8 @@ async def _fetch_anchor_pricing(preferences: Dict, plan_type: str, user_id: str,
 
 
 async def generate_single_plan(
-    preferences: Dict, plan_type: str, trip_id: str, user_id: str, anchor: Optional[Dict[str, Any]] = None
+    preferences: Dict, plan_type: str, trip_id: str, user_id: str, anchor: Optional[Dict[str, Any]] = None,
+    raw_flights: Any = _NOT_FETCHED, raw_hotels: Any = _NOT_FETCHED,
 ) -> Dict:
     """Generate a single vacation plan using AI with real price anchoring.
 
@@ -1256,6 +1351,11 @@ async def generate_single_plan(
     reuses that already-fetched flight/train + hotel pricing - used by the
     per-tier regenerate endpoint so retrying just the AI portion for one tier
     doesn't re-hit paid providers for pricing that hasn't changed.
+
+    `raw_flights`/`raw_hotels`, when provided (and anchor is None), are
+    passed straight through to _fetch_anchor_pricing - see its docstring.
+    Used by generate_trip_plans to share one flight search + one hotel
+    search across all three tiers instead of each tier searching for itself.
     """
     import json
 
@@ -1273,7 +1373,10 @@ async def generate_single_plan(
 
     # ── Step 1: Fetch real anchor prices (or reuse a previously-fetched one)
     if anchor is None:
-        anchor = await _fetch_anchor_pricing(preferences, plan_type, user_id, fare_units, room_count)
+        anchor = await _fetch_anchor_pricing(
+            preferences, plan_type, user_id, fare_units, room_count,
+            raw_flights=raw_flights, raw_hotels=raw_hotels,
+        )
 
     is_train = anchor["is_train"]
     is_road = anchor["is_road"]
@@ -1357,6 +1460,44 @@ async def generate_single_plan(
   Stars: {hotel_stars}★
   PRICE PER NIGHT: ₹{hotel_price_per_night:,.0f} total for {room_count} room(s) accommodating {num_travelers} traveler(s) (USE THIS EXACT NUMBER)""" if hotel_price_per_night > 0 else "Use realistic market hotel prices."
 
+    # Road-only descriptive flavor for the itinerary text (activities/
+    # highlights/driving notes) - same "narrative color, not pricing" role as
+    # traveler_preferences_block above. Pulls from the road_* wizard fields,
+    # which exist on the frontend (TripPlannerPage.jsx) but were previously
+    # never read anywhere in this file.
+    road_flavor_block = ""
+    if is_road:
+        route_style = preferences.get("road_route_style") or "Fastest"
+        drivers = preferences.get("road_drivers") or 1
+        max_driving_hours_per_day = preferences.get("road_max_driving_hours_per_day") or 8
+        road_lines = [
+            f"- Route style: {route_style}",
+            f"- Driving: {drivers} driver(s), max {max_driving_hours_per_day} hours/day - break the trip into "
+            "realistic driving days/stops instead of one long haul, and mention driving time between stops",
+        ]
+        route_avoidances = preferences.get("road_route_avoidances") or []
+        if route_avoidances:
+            road_lines.append(f"- Route avoidances: {', '.join(route_avoidances)}")
+        avoid = preferences.get("road_avoid") or []
+        if avoid:
+            road_lines.append(f"- Avoid on route: {', '.join(avoid)}")
+        overnight_accommodation = preferences.get("road_overnight_accommodation") or []
+        road_lines.append(
+            f"- Overnight waypoint stays: {', '.join(overnight_accommodation) if overnight_accommodation else 'no preference'}"
+        )
+        food_preference = preferences.get("road_food_preference") or "Mix of everything"
+        road_lines.append(f"- Food along the route: {food_preference}")
+        route_attractions = preferences.get("road_route_attractions") or []
+        if route_attractions:
+            road_lines.append(f"- Route attractions to favor: {', '.join(route_attractions)}")
+        vehicle_note = (preferences.get("road_vehicle_mileage_or_model") or "").strip()
+        if vehicle_note:
+            road_lines.append(f"- Vehicle: {vehicle_note}")
+        road_flavor_block = (
+            "ROAD TRIP PREFERENCES (reflect these in the itinerary's activities/highlights text - "
+            "they do not change the price above):\n" + "\n".join(road_lines) + "\n"
+        )
+
     # Mode-agnostic descriptive flavor for the itinerary text (activities/
     # meals/highlights) - same "narrative color, not pricing" role as
     # cruise_flavor_block above, but applies to every transport mode since
@@ -1395,44 +1536,6 @@ async def generate_single_plan(
         traveler_preferences_block = (
             "TRAVELER PREFERENCES (reflect these in the itinerary's activities/meals/highlights "
             "text - they do not change the prices above):\n" + "\n".join(traveler_preference_lines)
-        )
-
-    # Road-only descriptive flavor for the itinerary text (activities/
-    # highlights/driving notes) - same "narrative color, not pricing" role as
-    # traveler_preferences_block above. Pulls from the road_* wizard fields,
-    # which exist on the frontend (TripPlannerPage.jsx) but were previously
-    # never read anywhere in this file.
-    road_flavor_block = ""
-    if is_road:
-        route_style = preferences.get("road_route_style") or "Fastest"
-        drivers = preferences.get("road_drivers") or 1
-        max_driving_hours_per_day = preferences.get("road_max_driving_hours_per_day") or 8
-        road_lines = [
-            f"- Route style: {route_style}",
-            f"- Driving: {drivers} driver(s), max {max_driving_hours_per_day} hours/day - break the trip into "
-            "realistic driving days/stops instead of one long haul, and mention driving time between stops",
-        ]
-        route_avoidances = preferences.get("road_route_avoidances") or []
-        if route_avoidances:
-            road_lines.append(f"- Route avoidances: {', '.join(route_avoidances)}")
-        avoid = preferences.get("road_avoid") or []
-        if avoid:
-            road_lines.append(f"- Avoid on route: {', '.join(avoid)}")
-        overnight_accommodation = preferences.get("road_overnight_accommodation") or []
-        road_lines.append(
-            f"- Overnight waypoint stays: {', '.join(overnight_accommodation) if overnight_accommodation else 'no preference'}"
-        )
-        food_preference = preferences.get("road_food_preference") or "Mix of everything"
-        road_lines.append(f"- Food along the route: {food_preference}")
-        route_attractions = preferences.get("road_route_attractions") or []
-        if route_attractions:
-            road_lines.append(f"- Route attractions to favor: {', '.join(route_attractions)}")
-        vehicle_note = (preferences.get("road_vehicle_mileage_or_model") or "").strip()
-        if vehicle_note:
-            road_lines.append(f"- Vehicle: {vehicle_note}")
-        road_flavor_block = (
-            "ROAD TRIP PREFERENCES (reflect these in the itinerary's activities/highlights text - "
-            "they do not change the price above):\n" + "\n".join(road_lines) + "\n"
         )
 
     prompt = f"""You are a travel pricing engine. Generate a {plan_type} trip plan as valid JSON only.
@@ -1566,6 +1669,16 @@ MEAL AND ACTIVITY PRICING (group size = {num_travelers}):
         for day_key, day_val in list(itinerary.items()):
             if not isinstance(day_val, dict):
                 itinerary[day_key] = {}
+
+        # A response that parsed as valid JSON but came back with zero days
+        # (itinerary was `{}`, `null`, or a wrongly-typed value normalized to
+        # `{}` above) is not a usable plan - raising here (instead of letting
+        # it fall through to status='ready') routes it through the same
+        # retry-then-fail path below as any other malformed response, so it
+        # ends up "generation_failed": True rather than a "ready" plan with
+        # nothing in it.
+        if not itinerary:
+            raise ValueError(f"{plan_type}: AI returned an empty itinerary (zero days)")
 
         if anchor_transport_price > 0:
             if not isinstance(plan_data.get('cost_breakdown'), dict):
@@ -2178,10 +2291,17 @@ async def search_hotels_endpoint(req: HotelSearchRequest, request: Request):
 async def get_destination_coords_endpoint(destination: str, request: Request):
     await get_current_user(request)
     coords = await locations_service.geocode_destination(destination)
-    if not coords:
-        # Final fallback to amadeus mock coords
-        coords = amadeus_service.get_destination_coords(destination)
-    return coords
+    if coords:
+        return {**coords, "geocoded": True}
+    # Final fallback: amadeus_service.get_destination_coords never returns
+    # None - worst case it hands back a random point anywhere on the globe.
+    # That's still useful as SOMETHING to plot, but it's a guess, not a real
+    # geocode, and looks identical to a correct pin unless callers are told
+    # otherwise - geocoded: False lets the frontend say so instead of
+    # silently centering the map on a location that has nothing to do with
+    # the actual destination.
+    coords = amadeus_service.get_destination_coords(destination)
+    return {**coords, "geocoded": False}
 
 
 @api_router.get("/locations/venue-coords")

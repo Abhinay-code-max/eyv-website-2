@@ -281,18 +281,12 @@ def _transform(itineraries: List[Dict], origin: str, destination: str) -> List[D
     return sorted(flights, key=lambda f: f["price"]["total"])
 
 
-async def get_anchor_flight(
-    origin: str,
-    destination: str,
-    departure_date: str,
-    travelers: int = 1,
-    preference: str = "cheapest",
-) -> Optional[Dict]:
-    """
-    Get a single representative flight for AI plan price anchoring.
-    Same interface as duffel_service.get_anchor_flight().
-    """
-    flights = await search_flights(origin, destination, departure_date, travelers=travelers)
+def select_anchor_flight(flights: List[Dict], preference: str = "cheapest") -> Optional[Dict]:
+    """Pick one representative flight from an already-fetched result list -
+    pure selection, no API call. Split out of get_anchor_flight so a caller
+    that fetches once and needs three tiers' worth of picks (Budget/Premium/
+    Luxury) can select three times against the same list instead of
+    re-searching per tier."""
     if not flights:
         return None
 
@@ -305,3 +299,18 @@ async def get_anchor_flight(
         return min(flights, key=lambda f: f.get("duration_mins", 9999))
 
     return min(flights, key=lambda f: f["price"]["total"])
+
+
+async def get_anchor_flight(
+    origin: str,
+    destination: str,
+    departure_date: str,
+    travelers: int = 1,
+    preference: str = "cheapest",
+) -> Optional[Dict]:
+    """
+    Get a single representative flight for AI plan price anchoring.
+    Same interface as duffel_service.get_anchor_flight().
+    """
+    flights = await search_flights(origin, destination, departure_date, travelers=travelers)
+    return select_anchor_flight(flights, preference)

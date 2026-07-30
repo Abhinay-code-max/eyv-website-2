@@ -28,6 +28,8 @@ HOTEL_TTL_SECONDS = 4 * 60 * 60     # hotel rates are stable for longer
 async def ensure_indexes(db):
     await db.price_cache.create_index("item_id", unique=True)
     await db.price_cache.create_index("expires_at", expireAfterSeconds=0)
+    await db.search_cache.create_index("cache_key", unique=True)
+    await db.search_cache.create_index("expires_at", expireAfterSeconds=0)
 
 
 def _ttl_seconds(item_type: str) -> int:
@@ -149,3 +151,50 @@ async def _requote(item_type: str, provider: str, provider_ref: Dict[str, Any]) 
         return None
 
     return None
+
+
+# ── Raw search-result cache ──────────────────────────────────────────────
+# Separate concern from the item-level cache above: that one exists so a
+# booking can re-verify a price server-side; this one exists so an
+# identical/near-identical search (same route+dates, same tier-generation
+# preferences) doesn't re-hit Duffel/SerpApi at all. Reuses the same
+# FLIGHT_TTL_SECONDS/HOTEL_TTL_SECONDS split - flight offers move faster
+# than hotel rates for the item cache above, and that's just as true for
+# raw search results, so there's no reason to pick different numbers here.
+
+def _search_cache_key(item_type: str, params: Dict[str, Any]) -> str:
+    """Stable key from whatever params actually change the result set -
+    caller decides which params are meaningful (route+dates+travelers for
+    flights; destination+check_in/out+travelers+currency for hotels)."""
+    parts = [item_type] + [f"{k}={params[k]}" for k in sorted(params)]
+    return "|".join(str(p) for p in parts)
+
+
+async def get_cached_search(db, item_type: str, params: Dict[str, Any]) -> Optional[List[Dict]]:
+    """Cache hit, not expired -> the previously fetched result list.
+    Anything else (miss, or expired-but-not-yet-purged by Mongo's TTL
+    monitor) -> None, meaning the caller must fetch live."""
+    key = _search_cache_key(item_type, params)
+    doc = await db.search_cache.find_one({"cache_key": key}, {"_id": 0})
+    if not doc or _is_expired(doc):
+        return None
+    return doc["results"]
+
+
+async def cache_search_response(db, item_type: str, params: Dict[str, Any], results: List[Dict]) -> None:
+    """Store a raw search response for reuse. Deliberately never caches an
+    empty/falsy result - that's more often a transient provider hiccup or a
+    missing API key than a genuine "no results", and caching it would mask
+    a real recovery for the full TTL window."""
+    if not results:
+        return
+    key = _search_cache_key(item_type, params)
+    now = datetime.now(timezone.utc)
+    doc = {
+        "cache_key": key,
+        "item_type": item_type,
+        "results": results,
+        "created_at": now,
+        "expires_at": now + timedelta(seconds=_ttl_seconds(item_type)),
+    }
+    await db.search_cache.replace_one({"cache_key": key}, doc, upsert=True)
