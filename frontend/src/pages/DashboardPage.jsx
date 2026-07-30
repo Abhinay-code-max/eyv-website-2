@@ -13,6 +13,7 @@ import EYVLogo from '../components/EYVLogo';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { fadeUp, staggerItem, buttonHover } from '../constants/motion';
+import { toast } from '../components/ui/sonner';
 
 /* ─────────────────────────────────────────────────────────────────────
    THEME ENGINE
@@ -209,14 +210,23 @@ const DashboardPage = ({ user }) => {
     }
   };
 
-  const handleDeleteTrip = async (tripId) => {
-    if (!window.confirm('Are you sure you want to delete this trip?')) return;
+  const deleteTripNow = async (tripId) => {
     try {
       await axios.delete(`${API_URL}/trips/${tripId}`, { withCredentials: true });
       setTrips(trips.filter(t => t.trip_id !== tripId));
+      toast.success('Trip deleted');
     } catch (error) {
       console.error('Error deleting trip:', error);
+      toast.error('Could not delete this trip. Please try again.');
     }
+  };
+
+  const handleDeleteTrip = (tripId) => {
+    toast('Delete this trip?', {
+      description: 'This cannot be undone.',
+      action: { label: 'Delete', onClick: () => deleteTripNow(tripId) },
+      cancel: { label: 'Cancel' },
+    });
   };
 
   const handleSendMessage = async () => {

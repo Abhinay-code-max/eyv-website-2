@@ -8,6 +8,7 @@ import { PREMIUM } from '../constants/testIds';
 import { formatCurrency } from '../lib/currency';
 import EYVLogo from '../components/EYVLogo';
 import { Button } from '../components/ui/button';
+import { toast } from '../components/ui/sonner';
 
 const PremiumPage = ({ user }) => {
   const navigate = useNavigate();
@@ -50,27 +51,31 @@ const PremiumPage = ({ user }) => {
       }
     } catch (error) {
       console.error('Subscription error:', error);
-      alert('Failed to start checkout. Please try again.');
+      toast.error('Failed to start checkout. Please try again.');
       setProcessing(false);
     }
   };
 
-  const handleCancel = async () => {
-    if (!window.confirm(
-      "Cancel your Premium subscription? You'll keep full access until the end of your current billing period - it just won't renew after that."
-    )) {
-      return;
-    }
+  const cancelSubscriptionNow = async () => {
     setActionProcessing('cancel');
     try {
       const response = await axios.post(`${API_URL}/subscription/cancel`, {}, { withCredentials: true });
       setStatus(response.data);
+      toast.success("Subscription cancelled - you'll keep access until the end of this billing period.");
     } catch (error) {
       console.error('Cancel subscription error:', error);
-      alert('Could not cancel your subscription. Please try again.');
+      toast.error('Could not cancel your subscription. Please try again.');
     } finally {
       setActionProcessing(null);
     }
+  };
+
+  const handleCancel = () => {
+    toast("Cancel your Premium subscription?", {
+      description: "You'll keep full access until the end of your current billing period - it just won't renew after that.",
+      action: { label: 'Cancel subscription', onClick: cancelSubscriptionNow },
+      cancel: { label: 'Keep subscription' },
+    });
   };
 
   const handleResume = async () => {
@@ -80,7 +85,7 @@ const PremiumPage = ({ user }) => {
       setStatus(response.data);
     } catch (error) {
       console.error('Resume subscription error:', error);
-      alert('Could not resume your subscription. Please try again.');
+      toast.error('Could not resume your subscription. Please try again.');
     } finally {
       setActionProcessing(null);
     }
@@ -99,7 +104,7 @@ const PremiumPage = ({ user }) => {
       }
     } catch (error) {
       console.error('Billing portal error:', error);
-      alert('Could not open billing management. Please try again.');
+      toast.error('Could not open billing management. Please try again.');
       setActionProcessing(null);
     }
   };

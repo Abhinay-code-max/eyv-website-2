@@ -5,6 +5,7 @@ import '@/App.css';
 import LoadingAnimation from './components/LoadingAnimation';
 import AuthCallback from './pages/AuthCallback';
 import ProtectedRoute from './components/ProtectedRoute';
+import { Toaster } from './components/ui/sonner';
 
 /* ── Lazy-load every page (code splitting per route) ─────────────
    Each page becomes its own JS chunk, downloaded only when needed.
@@ -112,6 +113,7 @@ function AppRouter() {
 function App() {
   return (
     <div className="App">
+      <Toaster position="top-center" richColors closeButton />
       <BrowserRouter>
         <AppRouter />
       </BrowserRouter>

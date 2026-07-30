@@ -12,6 +12,7 @@ import EYVLogo from '../components/EYVLogo';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
+import { toast } from '../components/ui/sonner';
 
 const CATEGORIES = [
   { value: 'boarding_pass', label: 'Boarding Pass', icon: Ticket },
@@ -67,7 +68,7 @@ const WalletPage = ({ user }) => {
   };
 
   const handleUpload = async () => {
-    if (!uploadForm.file) { alert('Please select a file'); return; }
+    if (!uploadForm.file) { toast.error('Please select a file'); return; }
     setUploading(true);
     try {
       const formData = new FormData();
@@ -81,16 +82,26 @@ const WalletPage = ({ user }) => {
       setShowUpload(false);
       setUploadForm({ file: null, title: '', category: 'document', description: '' });
       fetchItems();
-    } catch (error) { console.error('Upload error:', error); alert('Failed to upload file'); }
+    } catch (error) { console.error('Upload error:', error); toast.error('Failed to upload file'); }
     finally { setUploading(false); }
   };
 
-  const handleDelete = async (itemId) => {
-    if (!window.confirm('Delete this item from your wallet?')) return;
+  const deleteItemNow = async (itemId) => {
     try {
       await axios.delete(`${API_URL}/wallet/${itemId}`, { withCredentials: true });
       fetchItems();
-    } catch (error) { console.error('Delete error:', error); }
+      toast.success('Deleted from wallet');
+    } catch (error) {
+      console.error('Delete error:', error);
+      toast.error('Could not delete this item. Please try again.');
+    }
+  };
+
+  const handleDelete = (itemId) => {
+    toast('Delete this item from your wallet?', {
+      action: { label: 'Delete', onClick: () => deleteItemNow(itemId) },
+      cancel: { label: 'Cancel' },
+    });
   };
 
   const handlePreview = async (item) => {
@@ -107,7 +118,7 @@ const WalletPage = ({ user }) => {
         responseType: 'blob',
       });
       setPreviewUrl(URL.createObjectURL(response.data));
-    } catch (error) { console.error('Preview error:', error); alert('Failed to load preview'); }
+    } catch (error) { console.error('Preview error:', error); toast.error('Failed to load preview'); }
   };
 
   const closePreview = () => {

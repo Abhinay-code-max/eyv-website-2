@@ -39,17 +39,25 @@ const FlyToLocation = ({ center, zoom }) => {
 };
 
 const TripMap = ({ center, markers = [], route = null, height = '500px', zoom = 12 }) => {
-  const validCenter =
-    center && Array.isArray(center) && center.length === 2 && !isNaN(center[0]) && !isNaN(center[1])
-      ? center
-      : [20.5937, 78.9629]; // India centroid as default
+  const hasValidCenter =
+    center && Array.isArray(center) && center.length === 2 && !isNaN(center[0]) && !isNaN(center[1]);
+  // Falls back to India's geographic centroid when the caller couldn't
+  // supply a real center at all (e.g. every geocoding attempt failed) -
+  // just enough to render a map rather than nothing, never meant to look
+  // like a real answer. The banner below is what tells the two apart.
+  const validCenter = hasValidCenter ? center : [20.5937, 78.9629];
 
   return (
     <div
       data-testid={MAP_VIEW.mapContainer}
-      className="rounded-2xl overflow-hidden border border-[#E7E5E4]"
+      className="rounded-2xl overflow-hidden border border-[#E7E5E4] relative"
       style={{ height }}
     >
+      {!hasValidCenter && (
+        <div className="absolute top-2 left-2 right-2 z-[1000] text-xs font-medium text-amber-800 bg-amber-100/95 border border-amber-300 rounded-lg px-3 py-2 shadow">
+          We couldn't locate this - showing a default world view instead.
+        </div>
+      )}
       <MapContainer
         center={validCenter}
         zoom={zoom}

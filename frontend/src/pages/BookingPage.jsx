@@ -15,6 +15,7 @@ import EYVLogo from '../components/EYVLogo';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
+import { toast } from '../components/ui/sonner';
 
 /* ── Currency helper ───────────────────────────────────────────────────── */
 const fmt = (priceObj, field = 'total') => formatCurrency(priceObj?.[field], priceObj?.currency);
@@ -198,7 +199,7 @@ const BookingPage = ({ user }) => {
 
   const handleFlightSearch = async () => {
     if (!flightForm.origin || !flightForm.destination || !flightForm.departure_date) {
-      alert('Please fill From, To and Departure date'); return;
+      toast.error('Please fill From, To and Departure date'); return;
     }
     setLoading(true); setFlights([]);
     try {
@@ -210,7 +211,7 @@ const BookingPage = ({ user }) => {
 
   const handleHotelSearch = async () => {
     if (!hotelForm.destination || !hotelForm.check_in || !hotelForm.check_out) {
-      alert('Please fill all hotel fields'); return;
+      toast.error('Please fill all hotel fields'); return;
     }
     setLoading(true); setHotels([]);
     try {
@@ -238,7 +239,7 @@ const BookingPage = ({ user }) => {
       );
       if (cr.data.url) { window.location.href = cr.data.url; }
       else { setBookingSuccess(br.data); setShowBookingModal(false); fetchBookings(); }
-    } catch (e) { console.error(e); alert('Booking failed. Please try again.'); }
+    } catch (e) { console.error(e); toast.error('Booking failed. Please try again.'); }
   };
 
   /* ── Resume payment on a booking still awaiting it (same checkout call
@@ -253,7 +254,7 @@ const BookingPage = ({ user }) => {
       if (cr.data.url) { window.location.href = cr.data.url; }
     } catch (e) {
       console.error(e);
-      alert('Could not start payment. Please try again.');
+      toast.error('Could not start payment. Please try again.');
       setPayingBookingId(null);
     }
   };

@@ -15,6 +15,7 @@ import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import EYVLogo from '../components/EYVLogo';
 import TripMap from '../components/TripMap';
+import { toast } from '../components/ui/sonner';
 
 /* ─── plan colour config ─────────────────────────────────────────── */
 const PLAN_STYLES = {
@@ -192,6 +193,12 @@ const TripResultsPage = () => {
   const [selectedPlan, setSelectedPlan] = useState(null);
   const [mapCenter, setMapCenter] = useState(null);
   const [mapMarkers, setMapMarkers] = useState([]);
+  // True once we know the destination's coords came from a real geocode
+  // (curated list or Nominatim) rather than the last-resort random-guess
+  // fallback in amadeus_service.get_destination_coords - see
+  // fetchDestinationCoords below and the "approximate location" note near
+  // the map.
+  const [mapLocationUncertain, setMapLocationUncertain] = useState(false);
   // Road Trip map Phase 1 (route + waypoints/rendering). Kept as its own
   // state rather than folded into mapMarkers/mapCenter above, which stay
   // exactly as they were for flight/train/cruise trips - see isRoadTrip below.
@@ -307,6 +314,9 @@ const TripResultsPage = () => {
         ]);
       } catch (error) {
         console.error('Road route fetch error:', error);
+        if (!cancelled) {
+          toast.error("Couldn't map this trip's route - we couldn't locate the origin or destination.");
+        }
       }
     })();
 
@@ -532,9 +542,13 @@ const TripResultsPage = () => {
         `${API_URL}/destinations/${encodeURIComponent(destination)}/coords`,
         { withCredentials: true }
       );
-      const { lat, lng } = response.data;
+      const { lat, lng, geocoded } = response.data;
       setMapCenter([lat, lng]);
       setMapMarkers([{ lat, lng, title: destination, description: 'Your destination' }]);
+      setMapLocationUncertain(geocoded === false);
+      if (geocoded === false) {
+        toast.warning(`Couldn't pinpoint "${destination}" exactly - showing an approximate location.`);
+      }
     } catch (error) {
       console.error('Coords fetch error:', error);
     }
@@ -843,6 +857,11 @@ const TripResultsPage = () => {
                     style={{ fontFamily: 'Cormorant Garamond, serif' }}>
                     {isRoadTrip(trip) ? 'Road Trip Route' : 'Destination Map'}
                   </h3>
+                  {mapLocationUncertain && !isRoadTrip(trip) && (
+                    <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-4">
+                      We couldn't pinpoint this destination exactly - the map below is centered on an approximate location.
+                    </p>
+                  )}
                   <TripMap
                     center={mapCenter}
                     markers={
