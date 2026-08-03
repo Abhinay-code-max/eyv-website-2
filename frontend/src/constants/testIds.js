@@ -24,6 +24,7 @@ export const TRIP_PLANNER = {
   seniorsInput: 'seniors-input',
   travelersTotalDisplay: 'travelers-total-display',
   travelersError: 'travelers-error',
+  oneWayCheckbox: 'one-way-checkbox',
   submitButton: 'submit-planner-button',
   budgetCard: 'budget-plan-card',
   premiumCard: 'premium-plan-card',

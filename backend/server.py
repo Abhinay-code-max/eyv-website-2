@@ -43,6 +43,7 @@ from services import log_redaction
 from services import quota_service, usage_service
 from services import chat_service
 from services import booking_expiry_service
+from services import index_service
 from services import sentry_service
 from services.request_id_middleware import RequestIDMiddleware, RequestIDLogFilter, request_id_var
 from slowapi import Limiter
@@ -336,6 +337,11 @@ class TripPreferences(BaseModel):
     # client-supplied price. Any value sent by the client is discarded.
     num_travelers: int = Field(default=0, ge=0)
     transportation: str
+    # "round_trip" (default) or "one_way" - frontend TripPlannerPage's "One-way
+    # trip" checkbox (Trip Basics step). Previously absent from this model, so
+    # Pydantic's extra="ignore" default silently dropped it from every request -
+    # same class of bug the cruise_cabin_type comment above describes.
+    trip_direction: str = "round_trip"
     budget_level: str
     accommodation: List[str]
     interests: List[str]
@@ -366,6 +372,14 @@ class TripPreferences(BaseModel):
     road_food_preference: Optional[str] = None
     road_route_attractions: List[str] = Field(default_factory=list)
     road_avoid: List[str] = Field(default_factory=list)
+    # Cruise question branch (frontend TripPlannerPage "Cruise Preferences"
+    # step) - only meaningful when transportation == "Cruise". Previously
+    # absent from this model, so FastAPI/Pydantic silently dropped them from
+    # every request before generation ever saw them.
+    cruise_cabin_type: Optional[str] = None
+    cruise_duration_preference: Optional[str] = None
+    cruise_dining_style: Optional[str] = None
+    cruise_itinerary_style: Optional[str] = None
 
     @model_validator(mode="after")
     def _derive_and_validate_num_travelers(self):
@@ -500,7 +514,9 @@ async def google_login():
     state = secrets.token_urlsafe(24)
     await db.oauth_states.insert_one({
         "state": state,
-        "created_at": datetime.now(timezone.utc).isoformat()
+        # Native datetime (not .isoformat()) - the TTL index in
+        # index_service.py needs a real BSON Date to expire these.
+        "created_at": datetime.now(timezone.utc)
     })
 
     params = {
@@ -553,7 +569,9 @@ async def google_callback(code: Optional[str] = None, state: Optional[str] = Non
         "email": profile["email"],
         "name": profile.get("name", profile["email"]),
         "picture": profile.get("picture"),
-        "created_at": datetime.now(timezone.utc).isoformat()
+        # Native datetime (not .isoformat()) - the TTL index in
+        # index_service.py needs a real BSON Date to expire these.
+        "created_at": datetime.now(timezone.utc)
     })
 
     return RedirectResponse(f"{FRONTEND_URL}/dashboard#session_id={ticket}")
@@ -569,7 +587,11 @@ async def exchange_session(request: SessionExchangeRequest, response: Response, 
             raise HTTPException(status_code=401, detail="Invalid session ID")
         await db.oauth_tickets.delete_one({"ticket": request.session_id})
 
-        ticket_created_at = datetime.fromisoformat(ticket_doc["created_at"])
+        ticket_created_at = ticket_doc["created_at"]
+        if isinstance(ticket_created_at, str):
+            ticket_created_at = datetime.fromisoformat(ticket_created_at)
+        if ticket_created_at.tzinfo is None:
+            ticket_created_at = ticket_created_at.replace(tzinfo=timezone.utc)
         if (datetime.now(timezone.utc) - ticket_created_at).total_seconds() > OAUTH_TICKET_TTL_SECONDS:
             raise HTTPException(status_code=401, detail="Session ID expired")
 
@@ -615,7 +637,9 @@ async def exchange_session(request: SessionExchangeRequest, response: Response, 
             # SHA-256 hash and compare hashes on every lookup instead.
             "session_token": _hash_session_token(session_token),
             "user_id": user_id,
-            "expires_at": expires_at.isoformat(),
+            # Native datetime (not .isoformat()) - the TTL index in
+            # index_service.py needs a real BSON Date to expire these.
+            "expires_at": expires_at,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "user_agent": http_request.headers.get("user-agent"),
         }
@@ -1152,6 +1176,11 @@ async def _fetch_anchor_pricing(
     search. Left at the _NOT_FETCHED sentinel, this fetches for itself
     (single-tier callers like regenerate-without-a-cached-anchor)."""
     is_train, is_cruise, is_road = _transport_mode_flags(preferences)
+    # One-way only has an observable effect on flights - train/cruise/road are
+    # all hardcoded/computed estimates already priced as a single leg (see
+    # their branches below), not a real fare that return-leg booking changes.
+    is_one_way = (not is_train and not is_cruise and not is_road
+                  and preferences.get("trip_direction") == "one_way")
 
     flight_price = 0
     flight_airline = ""
@@ -1166,6 +1195,10 @@ async def _fetch_anchor_pricing(
     train_number = ""
     train_class = ""
     train_duration = ""
+
+    cruise_price = 0
+    cruise_cabin_type = ""
+    cruise_duration_label = ""
 
     road_price = 0
     road_distance_km = 0
@@ -1191,15 +1224,45 @@ async def _fetch_anchor_pricing(
         train_number   = "Train"
         train_duration = "Varies by route"
         logger.info(f"{plan_type}: estimated train = {train_name} {train_class} ₹{train_price:,.0f}")
+    elif is_cruise:
+        # No accessible developer API exists for real cruise pricing
+        # (enterprise-only vendors) - same "no real inventory" situation as
+        # trains, so this is a hardcoded estimate table, not a live fetch.
+        # Cabin type is TIER-driven (mirrors how train class is tier-driven),
+        # not taken from the user's own cruise_cabin_type answer - letting a
+        # single user answer skew cabin choice would break the "Budget is
+        # cheapest, Luxury priciest" ordering the prompt enforces below.
+        # Duration IS taken from the user's answer - trip length is a date-
+        # range fact shared by all three tiers, not a luxury-level fact.
+        cruise_tier_cabin = {"Budget": "Interior", "Premium": "Balcony", "Luxury": "Suite"}
+        cruise_cabin_multiplier = {"Interior": 1.0, "Ocean View": 1.5, "Balcony": 2.2, "Suite": 3.75}
+        cruise_duration_rates = {
+            "Short getaway (2-5 nights)":   {"base_per_night": 9000, "typical_nights": 4},
+            "Week-long (6-9 nights)":       {"base_per_night": 8000, "typical_nights": 7},
+            "Extended voyage (10+ nights)": {"base_per_night": 7000, "typical_nights": 12},
+        }
+        cruise_cabin_type = cruise_tier_cabin.get(plan_type, "Interior")
+        cruise_duration_label = preferences.get("cruise_duration_preference") or "Week-long (6-9 nights)"
+        rates = cruise_duration_rates.get(cruise_duration_label, cruise_duration_rates["Week-long (6-9 nights)"])
+        price_per_traveler = rates["base_per_night"] * rates["typical_nights"] * cruise_cabin_multiplier[cruise_cabin_type]
+        # Halved: generate_single_plan sets this same anchor price on BOTH
+        # day 1 and the last day (outbound + return leg) and sums both into
+        # cost_breakdown.transportation, exactly like it does for train_price/
+        # flight_price - correct there because those really are one-way fares
+        # doubled into a round trip. A cruise voyage is one continuous price,
+        # not two separate legs, so it has to start out halved here or the
+        # single-voyage estimate gets silently double-counted downstream.
+        cruise_price = (price_per_traveler / 2) * fare_units
+        logger.info(f"{plan_type}: estimated cruise = {cruise_cabin_type} cabin, {cruise_duration_label} ₹{cruise_price:,.0f} (per leg; ₹{price_per_traveler * fare_units:,.0f} full voyage)")
     elif is_road:
         # No accessible real driving-distance/fuel-price API is wired into
-        # this app - like train pricing above, this is a computed estimate,
-        # not a live quote. Unlike the train table it's grounded in the
-        # trip's real origin/destination via geocoding (locations_service -
-        # same curated-list + Nominatim fallback chain the
-        # /destinations/{d}/coords endpoint already uses, with
-        # amadeus_service's mock coords as the final fallback) since fuel
-        # cost genuinely scales with distance in a way seat class doesn't.
+        # this app - like train/cruise, this is a computed estimate, not a
+        # live quote. Unlike train/cruise it's grounded in the trip's real
+        # origin/destination via geocoding (locations_service - same
+        # curated-list + Nominatim fallback chain the /destinations/{d}/coords
+        # endpoint already uses, with amadeus_service's mock coords as the
+        # final fallback) since fuel cost genuinely scales with distance in
+        # a way seat class doesn't.
         try:
             origin_coords = await _geocode_place(preferences.get("starting_location", ""))
             dest_coords = await _geocode_place(preferences.get("destination", ""))
@@ -1316,7 +1379,9 @@ async def _fetch_anchor_pricing(
 
     return {
         "is_train": is_train,
+        "is_cruise": is_cruise,
         "is_road": is_road,
+        "is_one_way": is_one_way,
         "road_price": road_price,
         "road_distance_km": road_distance_km,
         "road_vehicle_count": road_vehicle_count,
@@ -1334,6 +1399,9 @@ async def _fetch_anchor_pricing(
         "train_number": train_number,
         "train_class": train_class,
         "train_duration": train_duration,
+        "cruise_price": cruise_price,
+        "cruise_cabin_type": cruise_cabin_type,
+        "cruise_duration_label": cruise_duration_label,
         "hotel_name": hotel_name,
         "hotel_price_per_night": hotel_price_per_night,
         "hotel_stars": hotel_stars,
@@ -1379,15 +1447,16 @@ async def generate_single_plan(
         )
 
     is_train = anchor["is_train"]
+    is_cruise = anchor["is_cruise"]
     is_road = anchor["is_road"]
+    # .get() with a default (unlike the direct indexing above) so an
+    # already-cached anchor_pricing dict from before this field existed
+    # (e.g. a regenerate reusing an old stored plan's anchor) doesn't KeyError -
+    # it just falls back to "has a return leg", the previous universal behavior.
+    is_one_way = anchor.get("is_one_way", False)
     road_price = anchor["road_price"]
     road_distance_km = anchor["road_distance_km"]
     road_vehicle_count = anchor["road_vehicle_count"]
-    # Precomputed here (rather than inline in the prompt f-string below) to
-    # avoid nesting an f-string inside the outer triple-quoted prompt f-string.
-    road_transport_detail_prefix = (
-        f"Self-drive road trip ({road_distance_km:.0f} km, {road_vehicle_count} vehicle(s)) " if is_road else ""
-    )
     flight_price = anchor["flight_price"]
     flight_airline = anchor["flight_airline"]
     flight_number = anchor["flight_number"]
@@ -1400,10 +1469,35 @@ async def generate_single_plan(
     train_number = anchor["train_number"]
     train_class = anchor["train_class"]
     train_duration = anchor["train_duration"]
+    cruise_price = anchor["cruise_price"]
+    cruise_cabin_type = anchor["cruise_cabin_type"]
+    cruise_duration_label = anchor["cruise_duration_label"]
     hotel_name = anchor["hotel_name"]
     hotel_price_per_night = anchor["hotel_price_per_night"]
     hotel_stars = anchor["hotel_stars"]
     hotel_limited_inventory = anchor["hotel_limited_inventory"]
+
+    # Single source of truth for "the anchor transport leg" for this trip -
+    # train/cruise/flight are mutually exclusive - used everywhere below
+    # (prompt constraints, JSON template, system message, post-processing)
+    # instead of repeating a train-or-flight-only ternary in a dozen places,
+    # which is what broke when cruise silently fell through to flight.
+    if is_train:
+        anchor_transport_price = train_price
+        anchor_transport_label = "train"
+        transport_details_prefix = f"{train_name} {train_class} "
+    elif is_cruise:
+        anchor_transport_price = cruise_price
+        anchor_transport_label = "cruise"
+        transport_details_prefix = f"{cruise_cabin_type} cabin cruise "
+    elif is_road:
+        anchor_transport_price = road_price
+        anchor_transport_label = "road"
+        transport_details_prefix = f"Self-drive road trip ({road_distance_km:.0f} km, {road_vehicle_count} vehicle(s)) "
+    else:
+        anchor_transport_price = flight_price
+        anchor_transport_label = "flight"
+        transport_details_prefix = f"{flight_airline} {flight_number} "
 
     # ── Step 2: Build tier-specific instructions ─────────────────────────────
     tier_rules = {
@@ -1435,18 +1529,23 @@ async def generate_single_plan(
 
     # ── Step 3: Build the prompt with constraints at the TOP ─────────────────
     if is_train:
-        flight_constraint = f"""TRAIN (DO NOT CHANGE THESE VALUES):
+        transport_constraint = f"""TRAIN (DO NOT CHANGE THESE VALUES):
   Train Name: {train_name}
   Class: {train_class}
   Duration: {train_duration}
   PRICE: ₹{train_price:,.0f} total for {num_travelers} traveler(s) (USE THIS EXACT NUMBER)""" if train_price > 0 else "Use realistic Indian train prices."
+    elif is_cruise:
+        transport_constraint = f"""CRUISE (DO NOT CHANGE THESE VALUES):
+  Cabin Type: {cruise_cabin_type}
+  Voyage Length: {cruise_duration_label}
+  PRICE: ₹{cruise_price:,.0f} total for {num_travelers} traveler(s) (USE THIS EXACT NUMBER)""" if cruise_price > 0 else "Use realistic cruise fare estimates."
     elif is_road:
-        flight_constraint = f"""ROAD TRIP FUEL + TOLL ESTIMATE (DO NOT CHANGE THIS VALUE — this is an ESTIMATE, not a real quoted price):
+        transport_constraint = f"""ROAD TRIP FUEL + TOLL ESTIMATE (DO NOT CHANGE THIS VALUE — this is an ESTIMATE, not a real quoted price):
   Estimated driving distance: {road_distance_km:.0f} km (one-way)
   Vehicle(s) needed: {road_vehicle_count}
   PRICE: ₹{road_price:,.0f} total for {num_travelers} traveler(s), one-way (USE THIS EXACT NUMBER)""" if road_price > 0 else "Use a realistic estimated fuel + toll cost for a road trip of this distance — present it clearly as an estimate, not a real quote."
     else:
-        flight_constraint = f"""FLIGHT (DO NOT CHANGE THESE VALUES):
+        transport_constraint = f"""FLIGHT (DO NOT CHANGE THESE VALUES):
   Airline: {flight_airline}
   Flight Number: {flight_number}
   Departure: {flight_dep_time}
@@ -1460,11 +1559,35 @@ async def generate_single_plan(
   Stars: {hotel_stars}★
   PRICE PER NIGHT: ₹{hotel_price_per_night:,.0f} total for {room_count} room(s) accommodating {num_travelers} traveler(s) (USE THIS EXACT NUMBER)""" if hotel_price_per_night > 0 else "Use realistic market hotel prices."
 
+    # Cruise-only descriptive flavor for the itinerary text (activities/
+    # highlights) - deliberately NOT part of the pricing constraints above.
+    # cruise_cabin_type here is the tier-driven cabin (see _fetch_anchor_pricing),
+    # used for narrative color; dining/itinerary style come straight from the
+    # user's own Cruise Preferences answers.
+    cruise_flavor_block = ""
+    if is_cruise:
+        dining_style = preferences.get("cruise_dining_style") or "Flexible anytime dining"
+        itinerary_style = preferences.get("cruise_itinerary_style") or "No preference"
+        if itinerary_style == "Island-hopping":
+            itinerary_guidance = "favor multiple ports of call / island-hopping stops across the voyage"
+        elif itinerary_style == "Single destination focus":
+            itinerary_guidance = "favor a single destination/port focus with more time onshore there"
+        elif "Relaxation" in itinerary_style:
+            itinerary_guidance = "favor onboard relaxation with fewer, shorter port stops"
+        else:
+            itinerary_guidance = "no strong itinerary-style preference - use your judgment"
+        cruise_flavor_block = f"""
+CRUISE PREFERENCES (reflect these in the itinerary's activities/highlights text - they do not change the price above):
+- Cabin type: {cruise_cabin_type}
+- Dining style: {dining_style}
+- Itinerary style: {itinerary_style} - {itinerary_guidance}
+"""
+
     # Road-only descriptive flavor for the itinerary text (activities/
     # highlights/driving notes) - same "narrative color, not pricing" role as
-    # traveler_preferences_block above. Pulls from the road_* wizard fields,
-    # which exist on the frontend (TripPlannerPage.jsx) but were previously
-    # never read anywhere in this file.
+    # cruise_flavor_block above. Pulls from the road_* wizard fields, which
+    # exist on the frontend (TripPlannerPage.jsx) but were previously never
+    # read anywhere in this file.
     road_flavor_block = ""
     if is_road:
         route_style = preferences.get("road_route_style") or "Fastest"
@@ -1543,7 +1666,7 @@ async def generate_single_plan(
 ╔══════════════════════════════════════════════════════╗
 ║  MANDATORY CONSTRAINTS — VIOLATION = INVALID OUTPUT  ║
 ╠══════════════════════════════════════════════════════╣
-║ {flight_constraint}
+║ {transport_constraint}
 ║
 ║ {hotel_constraint}
 ║
@@ -1561,6 +1684,7 @@ TRIP DETAILS:
 
 TIER GUIDELINES:
 {tier_rules[plan_type]}
+{cruise_flavor_block}
 {road_flavor_block}
 {traveler_preferences_block}
 OUTPUT: Return ONLY valid JSON, no markdown, no explanation:
@@ -1571,18 +1695,18 @@ OUTPUT: Return ONLY valid JSON, no markdown, no explanation:
   "itinerary": {{
     "day_1": {{
       "date": "{preferences['departure_date']}",
-      "transportation": {{"mode": "{'train' if is_train else ('road' if is_road else 'flight')}", "details": "{(train_name + ' ' + train_class + ' ') if is_train else (road_transport_detail_prefix if is_road else (flight_airline + ' ' + flight_number + ' '))}{preferences.get('starting_location','')} to {preferences['destination']}", "cost": {train_price if is_train and train_price > 0 else (road_price if is_road and road_price > 0 else (flight_price if flight_price > 0 else 15000))}}},
+      "transportation": {{"mode": "{anchor_transport_label}", "details": "{transport_details_prefix}{preferences.get('starting_location','')} to {preferences['destination']}", "cost": {anchor_transport_price if anchor_transport_price > 0 else 15000}}},
       "activities": [{{"time": "14:00", "activity": "Check-in and explore", "location": "Hotel", "cost": 0, "category": "free", "pricing_type": "flat_group"}}],
       "accommodation": {{"name": "{hotel_name or 'Hotel'}", "type": "hotel", "cost": {hotel_price_per_night if hotel_price_per_night > 0 else 5000}, "location": "{preferences['destination']}"}},
       "meals": [{{"time": "dinner", "restaurant": "Local restaurant", "cuisine": "Local", "cost": 500}}],
-      "daily_total": {int((train_price if is_train else (road_price if is_road else flight_price)) + hotel_price_per_night + 500) if (train_price if is_train else (road_price if is_road else flight_price)) and hotel_price_per_night else 20000},
-      "cumulative_total": {int((train_price if is_train else (road_price if is_road else flight_price)) + hotel_price_per_night + 500) if (train_price if is_train else (road_price if is_road else flight_price)) and hotel_price_per_night else 20000},
-      "fixed_costs": {int((train_price if is_train else (road_price if is_road else flight_price)) + hotel_price_per_night) if (train_price if is_train else (road_price if is_road else flight_price)) and hotel_price_per_night else 18000},
+      "daily_total": {int(anchor_transport_price + hotel_price_per_night + 500) if anchor_transport_price and hotel_price_per_night else 20000},
+      "cumulative_total": {int(anchor_transport_price + hotel_price_per_night + 500) if anchor_transport_price and hotel_price_per_night else 20000},
+      "fixed_costs": {int(anchor_transport_price + hotel_price_per_night) if anchor_transport_price and hotel_price_per_night else 18000},
       "variable_costs": 500
     }}
   }},
   "cost_breakdown": {{
-    "transportation": {train_price if is_train and train_price > 0 else (road_price if is_road and road_price > 0 else (flight_price if flight_price > 0 else 15000))},
+    "transportation": {anchor_transport_price if anchor_transport_price > 0 else 15000},
     "accommodation": 0,
     "food": 0,
     "activities": 0,
@@ -1594,7 +1718,7 @@ OUTPUT: Return ONLY valid JSON, no markdown, no explanation:
 }}
 
 Fill in ALL days from {preferences['departure_date']} to {preferences['return_date']}.
-Use EXACT prices from constraints above — especially ₹{train_price if is_train else (road_price if is_road else flight_price):,.0f} for {'train' if is_train else ('road' if is_road else 'flight')} and ₹{hotel_price_per_night:,.0f}/night for hotel.
+Use EXACT prices from constraints above — especially ₹{anchor_transport_price:,.0f} for {anchor_transport_label} and ₹{hotel_price_per_night:,.0f}/night for hotel.
 Generate realistic activities, meals, and local transport for each day.
 
 MEAL AND ACTIVITY PRICING (group size = {num_travelers}):
@@ -1621,7 +1745,7 @@ MEAL AND ACTIVITY PRICING (group size = {num_travelers}):
         system_message = (
             f"You are a travel cost calculator that outputs ONLY valid JSON. "
             f"You ALWAYS use the exact prices provided in the MANDATORY CONSTRAINTS section. "
-            f"{'Train' if is_train else ('Road trip' if is_road else 'Flight')} transport cost MUST be ₹{(train_price if is_train else (road_price if is_road else flight_price)):,.0f}. "
+            f"{anchor_transport_label.capitalize()} transport cost MUST be ₹{anchor_transport_price:,.0f}. "
             f"Hotel cost MUST be ₹{hotel_price_per_night:,.0f}/night. "
             f"Never invent or change these numbers."
         )
@@ -1651,10 +1775,8 @@ MEAL AND ACTIVITY PRICING (group size = {num_travelers}):
             raise ValueError("No JSON found in response")
 
         # ── Step 5: Post-process — enforce exact prices regardless of AI output
-        logger.info(f"{plan_type}: flight_price={flight_price}, hotel_price={hotel_price_per_night}")
+        logger.info(f"{plan_type}: anchor {anchor_transport_label}_price={anchor_transport_price}, hotel_price={hotel_price_per_night}")
         logger.info(f"{plan_type}: AI day_1 transport cost before fix = {plan_data.get('itinerary', {}).get('day_1', {}).get('transportation', {}).get('cost', 'N/A')}")
-        anchor_transport_price = train_price if is_train else (road_price if is_road else flight_price)
-        anchor_transport_label = "train" if is_train else ("road" if is_road else "flight")
 
         # The AI is asked to return "itinerary" as an object keyed by day_1,
         # day_2, ... with each day and its nested transportation/accommodation
@@ -1697,6 +1819,8 @@ MEAL AND ACTIVITY PRICING (group size = {num_travelers}):
                     d1['transportation']['mode'] = anchor_transport_label
                     if is_train:
                         d1['transportation']['details'] = f"{train_name} ({train_class}) - {preferences.get('starting_location','')} to {preferences['destination']}"
+                    elif is_cruise:
+                        d1['transportation']['details'] = f"{cruise_cabin_type} cabin cruise - {preferences.get('starting_location','')} to {preferences['destination']}"
                     elif is_road:
                         d1['transportation']['details'] = f"Self-drive - {preferences.get('starting_location','')} to {preferences['destination']} (~{road_distance_km:.0f} km)"
                     else:
@@ -1708,19 +1832,33 @@ MEAL AND ACTIVITY PRICING (group size = {num_travelers}):
                     if kw in act.get('activity', '').lower() or 'depart' in act.get('activity', '').lower():
                         act['cost'] = anchor_transport_price
 
-                # Last day: always force return transport to match outbound
+                # Last day: always force return transport to match outbound -
+                # unless this is a one-way flight, where there's no return leg
+                # to price. Zeroing it out here (rather than leaving whatever
+                # number the AI invented) is what keeps the cost_breakdown
+                # recompute below at 1x anchor_transport_price instead of the
+                # round-trip 2x - it sums every day's transportation.cost, so
+                # a zeroed last leg is the whole fix, no separate total-side
+                # change needed.
                 if len(days) > 1:
                     dl = itinerary[days[-1]]
                     if not isinstance(dl.get('transportation'), dict):
                         dl['transportation'] = {}
-                    dl['transportation']['cost'] = anchor_transport_price
-                    dl['transportation']['mode'] = anchor_transport_label
-                    if is_train:
-                        dl['transportation']['details'] = f"{train_name} ({train_class}) - {preferences['destination']} to {preferences.get('starting_location','')}"
-                    elif is_road:
-                        dl['transportation']['details'] = f"Self-drive - {preferences['destination']} to {preferences.get('starting_location','')} (~{road_distance_km:.0f} km)"
+                    if is_one_way:
+                        dl['transportation']['cost'] = 0
+                        dl['transportation']['mode'] = anchor_transport_label
+                        dl['transportation']['details'] = "No return flight booked (one-way trip)"
                     else:
-                        dl['transportation']['details'] = f"Return {flight_airline} {flight_number} - {preferences['destination']} to {preferences.get('starting_location','')}"
+                        dl['transportation']['cost'] = anchor_transport_price
+                        dl['transportation']['mode'] = anchor_transport_label
+                        if is_train:
+                            dl['transportation']['details'] = f"{train_name} ({train_class}) - {preferences['destination']} to {preferences.get('starting_location','')}"
+                        elif is_cruise:
+                            dl['transportation']['details'] = f"{cruise_cabin_type} cabin cruise - {preferences['destination']} to {preferences.get('starting_location','')}"
+                        elif is_road:
+                            dl['transportation']['details'] = f"Self-drive - {preferences['destination']} to {preferences.get('starting_location','')} (~{road_distance_km:.0f} km)"
+                        else:
+                            dl['transportation']['details'] = f"Return {flight_airline} {flight_number} - {preferences['destination']} to {preferences.get('starting_location','')}"
 
         if hotel_price_per_night > 0:
             for day_key, day_data in itinerary.items():
@@ -1802,6 +1940,8 @@ MEAL AND ACTIVITY PRICING (group size = {num_travelers}):
             )
         if is_train:
             plan_data['train_placeholder_pricing'] = True
+        if is_cruise:
+            plan_data['cruise_placeholder_pricing'] = True
         if is_road:
             plan_data['road_placeholder_pricing'] = True
         return plan_data
@@ -2155,6 +2295,7 @@ async def get_chat_history(trip_id: str, request: Request):
         ]
     }
 
+
 @api_router.get("/")
 async def root():
     return {
@@ -2381,15 +2522,16 @@ def _bookable_line_items(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
     Bookability is judged from anchor_pricing (the real Duffel/Ignav +
     SerpApi fetch done at generation time - see _fetch_anchor_pricing):
       - flight: anchor_pricing.flight_price > 0 AND not is_train AND not
-        is_road. Neither trains nor road trips have any real inventory
-        anywhere in this app (POST /search/trains always returns empty;
-        road trips are a geocoded-distance fuel/toll estimate, not a
-        provider quote) - both are computed/hardcoded estimates, not
-        provider quotes - see train_placeholder_pricing /
-        road_placeholder_pricing. "type": "train"/"road" are deliberately
-        never produced here, though the field is a free string so either
-        could be added later without a schema change if that ever becomes
-        real.
+        is_cruise AND not is_road. None of trains, cruises, or road trips
+        have any real inventory anywhere in this app (POST /search/trains
+        always returns empty; there is no cruise search at all; road trips
+        are a geocoded-distance fuel/toll estimate, not a provider quote) -
+        all three are computed/hardcoded estimates, not provider quotes -
+        see train_placeholder_pricing / cruise_placeholder_pricing /
+        road_placeholder_pricing. "type": "train"/"cruise"/"road" are
+        deliberately never produced here, though the field is a free
+        string so any could be added later without a schema change if
+        that ever becomes real.
       - hotel: anchor_pricing.hotel_price_per_night > 0. In both cases, 0
         means the real fetch failed and the AI was told to invent a
         placeholder number instead - not tied to any real fare/rate, so
@@ -2407,7 +2549,10 @@ def _bookable_line_items(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
     cost_breakdown = plan.get('cost_breakdown') or {}
     line_items = []
 
-    if not anchor.get('is_train') and not anchor.get('is_road') and anchor.get('flight_price', 0) > 0:
+    if (
+        not anchor.get('is_train') and not anchor.get('is_cruise') and not anchor.get('is_road')
+        and anchor.get('flight_price', 0) > 0
+    ):
         transport_price = cost_breakdown.get('transportation', 0)
         if transport_price > 0:
             line_items.append({
@@ -3443,6 +3588,10 @@ async def startup_event():
         await chat_service.ensure_indexes(db)
     except Exception as e:
         logger.warning(f"chat index setup failed at startup: {e}")
+    try:
+        await index_service.ensure_indexes(db)
+    except Exception as e:
+        logger.warning(f"index_service index setup failed at startup: {e}")
     try:
         # Warm the FX rate cache eagerly so the first real request doesn't
         # pay the fetch latency - _refresh_rates_if_stale() also runs lazily

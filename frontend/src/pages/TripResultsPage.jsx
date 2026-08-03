@@ -5,7 +5,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   ArrowLeft, DollarSign, Plane, Hotel, Utensils, Activity,
   Calendar, MapPin, Check, ChevronDown, ChevronUp, Sparkles, Loader2,
-  MessageCircle, Send, X,
+  MessageCircle, Send, X, ExternalLink,
 } from 'lucide-react';
 import { API_URL } from '../constants';
 import { TRIP_PLANNER } from '../constants/testIds';
@@ -57,6 +57,60 @@ const haversineMeters = (lat1, lng1, lat2, lng2) => {
 // city-level markers or fire too early for precise ones, so each waypoint
 // carries a `tier` and gets a different radius.
 const PROXIMITY_THRESHOLD_METERS = { venue: 500, city: 5000 };
+
+// "Open in Google Maps" handoff (additive to Phase 2's in-app tracking, not
+// a replacement). Pure URL construction against Google's free, keyless
+// "Maps URLs" product (https://developers.google.com/maps/documentation/urls/get-started)
+// - no API key, no billing, just a link that opens the native app or maps.google.com.
+// Google's own docs state the waypoints param supports at most 3 stops when
+// the link opens on a mobile browser, 9 otherwise - origin/destination are
+// separate params and don't count against this. A multi-city road trip can
+// easily have more overnight stops than that, so the list needs trimming
+// rather than either truncating blindly or overflowing the URL.
+const GOOGLE_MAPS_MAX_WAYPOINTS = { mobile: 3, desktop: 9 };
+
+// Google draws waypoints in the order given (this URL scheme doesn't
+// auto-optimize the route), so trimming can never reorder stops - only
+// choose which ones survive. Precisely geocoded venues (Phase 1's
+// geocode_venue found a real address) are kept over city-centroid fallbacks
+// first, since a city-centroid pin duplicates information the
+// origin/destination markers already convey. If venues alone still exceed
+// the cap, sample evenly across them instead of just keeping the first N,
+// so the link still traces the trip's overall shape instead of only its
+// first few days.
+const selectGoogleMapsWaypoints = (waypoints, maxCount) => {
+  if (waypoints.length <= maxCount) return waypoints;
+
+  const evenlySample = (arr, count) => {
+    if (count <= 0) return [];
+    if (arr.length <= count) return arr;
+    const step = arr.length / count;
+    return Array.from({ length: count }, (_, i) => arr[Math.min(arr.length - 1, Math.floor(i * step))]);
+  };
+
+  const indexed = waypoints.map((w, i) => ({ ...w, _i: i }));
+  const venues = indexed.filter((w) => w.tier === 'venue');
+  const cityFallbacks = indexed.filter((w) => w.tier !== 'venue');
+
+  const kept = venues.length <= maxCount
+    ? [...venues, ...evenlySample(cityFallbacks, maxCount - venues.length)]
+    : evenlySample(venues, maxCount);
+
+  return kept.sort((a, b) => a._i - b._i).map(({ _i, ...w }) => w);
+};
+
+const buildGoogleMapsDirectionsUrl = (origin, destination, waypoints) => {
+  const params = new URLSearchParams({
+    api: '1',
+    origin: `${origin.lat},${origin.lng}`,
+    destination: `${destination.lat},${destination.lng}`,
+    travelmode: 'driving',
+  });
+  if (waypoints.length > 0) {
+    params.set('waypoints', waypoints.map((w) => `${w.lat},${w.lng}`).join('|'));
+  }
+  return `https://www.google.com/maps/dir/?${params.toString()}`;
+};
 
 /* ─── collapsible day card ───────────────────────────────────────── */
 const DayCard = ({ day, details, formatCost, accent }) => {
@@ -506,6 +560,19 @@ const TripResultsPage = () => {
     setNextWaypointIndex((i) => i + 1);
   };
 
+  // "Open in Google Maps" handoff - additive alongside Start Trip's in-app
+  // tracking above, not a replacement for it. Pure link-out: no key, no
+  // billing, opens in a new tab (native app on mobile).
+  const openInGoogleMaps = () => {
+    const [origin, destination] = roadOriginDestMarkers;
+    if (!origin || !destination) return;
+    const isMobileUA = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+    const maxWaypoints = isMobileUA ? GOOGLE_MAPS_MAX_WAYPOINTS.mobile : GOOGLE_MAPS_MAX_WAYPOINTS.desktop;
+    const waypoints = selectGoogleMapsWaypoints(roadHotelMarkers, maxWaypoints);
+    const url = buildGoogleMapsDirectionsUrl(origin, destination, waypoints);
+    window.open(url, '_blank', 'noopener,noreferrer');
+  };
+
   // Load this trip's persisted chat history whenever tripId changes, using
   // the same `cancelled` guard as the trip-polling effect above so an
   // in-flight fetch for a previously-viewed trip can't overwrite the panel
@@ -887,16 +954,28 @@ const TripResultsPage = () => {
                             ? "Live tracking is on - we'll alert you when you're near a stop."
                             : "Turn on live tracking to get an alert when you're near a stop on your route."}
                         </p>
-                        <Button
-                          data-testid="road-trip-tracking-toggle"
-                          onClick={tripTracking ? stopTripTracking : startTripTracking}
-                          className="rounded-xl gap-2 text-white"
-                          style={{
-                            background: tripTracking ? '#57534E' : `linear-gradient(135deg, ${ps.accent}, ${ps.accent}CC)`,
-                          }}
-                        >
-                          {tripTracking ? 'Stop Trip' : 'Start Trip'}
-                        </Button>
+                        <div className="flex items-center gap-3">
+                          <Button
+                            data-testid="road-trip-open-google-maps"
+                            onClick={openInGoogleMaps}
+                            variant="outline"
+                            className="rounded-xl gap-2"
+                            style={{ borderColor: ps.accent, color: ps.accent }}
+                          >
+                            <ExternalLink size={16} />
+                            Open in Google Maps
+                          </Button>
+                          <Button
+                            data-testid="road-trip-tracking-toggle"
+                            onClick={tripTracking ? stopTripTracking : startTripTracking}
+                            className="rounded-xl gap-2 text-white"
+                            style={{
+                              background: tripTracking ? '#57534E' : `linear-gradient(135deg, ${ps.accent}, ${ps.accent}CC)`,
+                            }}
+                          >
+                            {tripTracking ? 'Stop Trip' : 'Start Trip'}
+                          </Button>
+                        </div>
                       </div>
                       {locationError && (
                         <p className="text-sm text-red-600 mt-3">{locationError}</p>
@@ -951,6 +1030,15 @@ const TripResultsPage = () => {
                 {selectedPlan.train_placeholder_pricing && (
                   <div className="mt-6 pt-6 border-t border-[#E7E5E4] text-sm text-[#57534E] italic">
                     Estimated train fares — not live pricing. Check IRCTC or Rome2rio for current fares.
+                  </div>
+                )}
+                {selectedPlan.cruise_placeholder_pricing && (
+                  <div className="mt-6 pt-6 border-t border-[#E7E5E4] text-sm text-[#57534E] italic">
+                    Estimated cruise fares — not live pricing.{' '}
+                    <a href="https://www.cruise.com/" target="_blank" rel="noopener noreferrer"
+                      className="underline not-italic" style={{ color: ps.accent }}>
+                      Search real cruise fares on Cruise.com
+                    </a>
                   </div>
                 )}
                 {selectedPlan.road_placeholder_pricing && (

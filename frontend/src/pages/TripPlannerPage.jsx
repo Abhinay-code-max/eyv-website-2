@@ -1,9 +1,14 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { MapPin, Calendar, Users, Plane, DollarSign, Hotel, Heart, ChevronRight, ChevronLeft, Sparkles } from 'lucide-react';
+import { Calendar, ChevronRight, ChevronLeft, Sparkles } from 'lucide-react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import axios from 'axios';
-import { API_URL, TRANSPORTATION_OPTIONS, ACCOMMODATION_OPTIONS, INTERESTS, TRIP_TYPES, BUDGET_LEVELS } from '../constants';
+import {
+  API_URL, TRANSPORTATION_OPTIONS, ACCOMMODATION_OPTIONS, INTERESTS, TRIP_TYPES, BUDGET_LEVELS,
+  ROAD_ROUTE_STYLE_OPTIONS, ROAD_ROUTE_AVOIDANCE_OPTIONS, ROAD_FUEL_TYPE_OPTIONS, ROAD_EV_RECHARGE_OPTIONS,
+  ROAD_OVERNIGHT_ACCOMMODATION_OPTIONS, ROAD_FOOD_PREFERENCE_OPTIONS, ROAD_ROUTE_ATTRACTIONS_OPTIONS, ROAD_AVOID_OPTIONS,
+  CRUISE_CABIN_TYPE_OPTIONS, CRUISE_DURATION_OPTIONS, CRUISE_DINING_STYLE_OPTIONS, CRUISE_ITINERARY_STYLE_OPTIONS,
+} from '../constants';
 import { TRIP_PLANNER } from '../constants/testIds';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -12,6 +17,11 @@ import { Checkbox } from '../components/ui/checkbox';
 import LocationAutocomplete from '../components/LocationAutocomplete';
 import TripLoadingScreen from '../components/TripLoadingScreen';
 import { getTotalTravelers, validateTravelers } from '../lib/travelers';
+import {
+  getDefaultTransportation, getDefaultTripType, getDefaultTravelPace,
+  getDefaultAccommodation, getDefaultInterestFromDestinationType,
+} from '../lib/tripDefaults';
+import { toast } from '../components/ui/sonner';
 
 const TripPlannerPage = ({ user }) => {
   const navigate = useNavigate();
@@ -26,7 +36,8 @@ const TripPlannerPage = ({ user }) => {
     adults: Number(location.state?.adults) || 1,
     children: 0,
     seniors: 0,
-    transportation: 'Train',
+    transportation: 'Flight',
+    trip_direction: 'round_trip',
     budget_level: 'Budget',
     accommodation: ['Hostel'],
     interests: [],
@@ -36,12 +47,115 @@ const TripPlannerPage = ({ user }) => {
     trip_type: 'Solo',
     currency: 'INR',
     budget_mode: true,
+
+    // Road trip branch (transportation === 'Road')
+    road_drivers: 1,
+    road_max_hours_before_break: 2,
+    road_break_duration_minutes: 15,
+    road_max_driving_hours_per_day: 8,
+    road_route_style: 'Fastest',
+    road_route_avoidances: [],
+    road_fuel_type: 'Petrol',
+    road_vehicle_mileage_or_model: '',
+    road_ev_battery_percent: 100,
+    road_ev_recharge_preference: 'Whichever is convenient',
+    road_overnight_accommodation: [],
+    road_food_preference: 'Mix of everything',
+    road_route_attractions: [],
+    road_avoid: [],
+
+    // Cruise branch (transportation === 'Cruise')
+    cruise_cabin_type: 'Interior',
+    cruise_duration_preference: 'Week-long (6-9 nights)',
+    cruise_dining_style: 'Flexible anytime dining',
+    cruise_itinerary_style: 'No preference',
   });
 
-  const totalSteps = 4;
+  // Location metadata (country/type/lat/lng) captured only when the user
+  // picks a LocationAutocomplete suggestion - never sent to the backend,
+  // purely a client-side signal for the smart defaults below. null means
+  // "no signal" (freehand text, or edited away from a prior selection).
+  const [destinationMeta, setDestinationMeta] = useState(null);
+  const [startingLocationMeta, setStartingLocationMeta] = useState(null);
+  // Tracks which interest (if any) is currently in formData.interests purely
+  // because of the destination-type nudge, so a later destination change can
+  // swap it out without touching anything the user picked themselves.
+  const [autoNudgedInterest, setAutoNudgedInterest] = useState(null);
+
+  // Fields with a smart default: once true, the auto-fill effects for that
+  // field stop overriding it - the user's explicit choice always wins.
+  const [touched, setTouched] = useState({
+    transportation: false,
+    trip_type: false,
+    travel_pace: false,
+    accommodation: false,
+    interests: false,
+  });
+  const markTouched = (field) => setTouched(prev => (field in prev ? { ...prev, [field]: true } : prev));
+
+  const selectField = (field, value) => {
+    setFormData(prev => ({ ...prev, [field]: value }));
+    markTouched(field);
+  };
 
   const totalTravelers = getTotalTravelers(formData);
   const travelersError = validateTravelers(formData);
+
+  const [quota, setQuota] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    axios.get(`${API_URL}/trips/quota-status`, { withCredentials: true })
+      .then(res => { if (!cancelled) setQuota(res.data); })
+      .catch(() => {}); // non-critical - just skip the display if this fails
+    return () => { cancelled = true; };
+  }, []);
+
+  // Smart defaults - each only fires while its field is untouched, and each
+  // recomputes from whatever upstream signal changed (dates, budget, party
+  // composition, resolved destination) so it keeps tracking the user's
+  // answers right up until they interact with the field directly.
+  useEffect(() => {
+    if (touched.transportation) return;
+    const next = getDefaultTransportation(destinationMeta, startingLocationMeta);
+    setFormData(prev => (prev.transportation === next ? prev : { ...prev, transportation: next }));
+  }, [destinationMeta, startingLocationMeta, touched.transportation]);
+
+  useEffect(() => {
+    if (touched.trip_type) return;
+    const next = getDefaultTripType(formData.adults, formData.children, formData.seniors);
+    setFormData(prev => (prev.trip_type === next ? prev : { ...prev, trip_type: next }));
+  }, [formData.adults, formData.children, formData.seniors, touched.trip_type]);
+
+  useEffect(() => {
+    if (touched.travel_pace) return;
+    const next = getDefaultTravelPace(formData.departure_date, formData.return_date);
+    setFormData(prev => (prev.travel_pace === next ? prev : { ...prev, travel_pace: next }));
+  }, [formData.departure_date, formData.return_date, touched.travel_pace]);
+
+  useEffect(() => {
+    if (touched.accommodation) return;
+    const next = getDefaultAccommodation(formData.budget_level);
+    setFormData(prev => (
+      prev.accommodation.length === next.length && prev.accommodation[0] === next[0]
+        ? prev
+        : { ...prev, accommodation: next }
+    ));
+  }, [formData.budget_level, touched.accommodation]);
+
+  useEffect(() => {
+    if (touched.interests) return;
+    const nudge = destinationMeta ? getDefaultInterestFromDestinationType(destinationMeta.type) : null;
+    if (nudge === autoNudgedInterest) return;
+    setFormData(prev => {
+      let interests = prev.interests;
+      if (autoNudgedInterest) interests = interests.filter(i => i !== autoNudgedInterest);
+      if (nudge && !interests.includes(nudge)) interests = [...interests, nudge];
+      return interests === prev.interests ? prev : { ...prev, interests };
+    });
+    setAutoNudgedInterest(nudge);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [destinationMeta, touched.interests]);
 
   const handleNext = () => {
     if (step === 1 && travelersError) return;
@@ -62,7 +176,15 @@ const TripPlannerPage = ({ user }) => {
       navigate(`/trip-results/${response.data.trip_id}`);
     } catch (error) {
       console.error('Error generating trip:', error);
-      alert('Failed to generate trip plans. Please try again.');
+      const data = error.response?.data;
+      if (error.response?.status === 429 && data?.reason === 'quota_exceeded') {
+        toast.error(data.detail);
+        setQuota({ is_premium: false, used: data.used, limit: data.limit, remaining: 0 });
+      } else if (error.response?.status === 429) {
+        toast.error(data?.detail || "You're doing that too fast - please wait a moment and try again.");
+      } else {
+        toast.error('Failed to generate trip plans. Please try again.');
+      }
       setLoading(false);
     }
   };
@@ -74,7 +196,31 @@ const TripPlannerPage = ({ user }) => {
         ? prev[field].filter(item => item !== value)
         : [...prev[field], value]
     }));
+    markTouched(field);
   };
+
+  // Road/Cruise get their own conditional step (mirrors each other) inserted
+  // right after "Travel Preferences", where Transportation is chosen -
+  // recomputed every render so switching transportation immediately grows,
+  // shrinks, or reorders the wizard without leaving `step` pointing at stale
+  // content.
+  const activeSteps = [
+    'basics',
+    'preferences',
+    ...(formData.transportation === 'Road' ? ['road'] : []),
+    ...(formData.transportation === 'Cruise' ? ['cruise'] : []),
+    'interests',
+    'details',
+  ];
+  const totalSteps = activeSteps.length;
+  const currentStepKey = activeSteps[step - 1];
+
+  const cardGridButton = (active) => `p-4 rounded-xl border-2 transition-all ${
+    active ? 'border-[#C47245] bg-[#C47245]/10' : 'border-[#E7E5E4] hover:border-[#C47245]/50'
+  }`;
+  const checkboxCard = (active) => `p-3 rounded-lg border-2 cursor-pointer transition-all ${
+    active ? 'border-[#C47245] bg-[#C47245]/10' : 'border-[#E7E5E4] hover:border-[#C47245]/50'
+  }`;
 
   /* ── Show cinematic loader during AI generation ── */
   if (loading) {
@@ -95,12 +241,33 @@ const TripPlannerPage = ({ user }) => {
           </h1>
           <p className="text-lg text-[#57534E]">Tell us about your dream vacation</p>
 
+          {quota && !quota.is_premium && (
+            <div data-testid={TRIP_PLANNER.quotaBanner}
+              className={`inline-flex flex-wrap items-center justify-center gap-1.5 mt-4 px-4 py-2 rounded-full text-sm font-medium ${
+                quota.remaining === 0
+                  ? 'bg-red-50 text-red-600 border border-red-200'
+                  : 'bg-[#F5F2EB] text-[#57534E] border border-[#E7E5E4]'
+              }`}>
+              {quota.remaining === 0 ? (
+                <>
+                  You've used all {quota.limit} free trip generations today —{' '}
+                  <button type="button" onClick={() => navigate('/premium')}
+                    className="underline font-semibold text-[#C47245]">
+                    upgrade to Premium
+                  </button>{' '}for unlimited planning
+                </>
+              ) : (
+                <>{quota.remaining} of {quota.limit} free trip generations left today</>
+              )}
+            </div>
+          )}
+
           {/* Progress */}
           <div className="flex items-center justify-center gap-2 mt-8">
-            {[1, 2, 3, 4].map(s => (
+            {activeSteps.map((key, idx) => (
               <div
-                key={s}
-                className={`h-2 rounded-full transition-all ${s <= step ? 'w-12 bg-[#C47245]' : 'w-8 bg-[#E7E5E4]'}`}
+                key={key}
+                className={`h-2 rounded-full transition-all ${idx + 1 <= step ? 'w-12 bg-[#C47245]' : 'w-8 bg-[#E7E5E4]'}`}
               />
             ))}
           </div>
@@ -114,8 +281,8 @@ const TripPlannerPage = ({ user }) => {
           animate={{ opacity: 1, scale: 1 }}
         >
           <AnimatePresence mode="wait">
-            {step === 1 && (
-              <motion.div key="step1" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }}
+            {currentStepKey === 'basics' && (
+              <motion.div key="basics" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }}
                 exit={{ opacity: 0, x: -20 }} className="space-y-6">
                 <h2 className="text-2xl font-medium text-[#2A4B5C] mb-6" style={{ fontFamily: 'Cormorant Garamond, serif' }}>
                   Trip Basics
@@ -126,7 +293,8 @@ const TripPlannerPage = ({ user }) => {
                     <LocationAutocomplete
                       testId={TRIP_PLANNER.destinationInput}
                       value={formData.destination}
-                      onChange={(val) => setFormData({ ...formData, destination: val })}
+                      onChange={(val) => { setFormData(prev => ({ ...prev, destination: val })); setDestinationMeta(null); }}
+                      onSelect={(s) => setDestinationMeta({ country: s.country, type: s.type, lat: s.lat, lng: s.lng })}
                       placeholder="Where do you want to go?"
                     />
                   </div>
@@ -137,7 +305,8 @@ const TripPlannerPage = ({ user }) => {
                     <LocationAutocomplete
                       testId={TRIP_PLANNER.startLocationInput}
                       value={formData.starting_location}
-                      onChange={(val) => setFormData({ ...formData, starting_location: val })}
+                      onChange={(val) => { setFormData(prev => ({ ...prev, starting_location: val })); setStartingLocationMeta(null); }}
+                      onSelect={(s) => setStartingLocationMeta({ country: s.country, type: s.type, lat: s.lat, lng: s.lng })}
                       placeholder="Where are you starting from?"
                     />
                   </div>
@@ -170,6 +339,17 @@ const TripPlannerPage = ({ user }) => {
                     </div>
                   </div>
                 </div>
+                <div
+                  data-testid={TRIP_PLANNER.oneWayCheckbox}
+                  onClick={() => setFormData({
+                    ...formData,
+                    trip_direction: formData.trip_direction === 'round_trip' ? 'one_way' : 'round_trip',
+                  })}
+                  className="inline-flex items-center gap-2 cursor-pointer select-none"
+                >
+                  <Checkbox checked={formData.trip_direction === 'one_way'} />
+                  <span className="text-sm text-[#57534E]">One-way trip (not booking a return leg)</span>
+                </div>
                 <div>
                   <Label className="text-[#C47245] uppercase tracking-wider text-xs font-medium mb-3 block">Travelers</Label>
                   <div className="grid grid-cols-3 gap-4">
@@ -194,8 +374,8 @@ const TripPlannerPage = ({ user }) => {
               </motion.div>
             )}
 
-            {step === 2 && (
-              <motion.div key="step2" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }}
+            {currentStepKey === 'preferences' && (
+              <motion.div key="preferences" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }}
                 exit={{ opacity: 0, x: -20 }} className="space-y-6">
                 <h2 className="text-2xl font-medium text-[#2A4B5C] mb-6" style={{ fontFamily: 'Cormorant Garamond, serif' }}>
                   Travel Preferences
@@ -205,12 +385,8 @@ const TripPlannerPage = ({ user }) => {
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                     {TRANSPORTATION_OPTIONS.map(option => (
                       <button key={option.value}
-                        onClick={() => setFormData({ ...formData, transportation: option.value })}
-                        className={`p-4 rounded-xl border-2 transition-all ${
-                          formData.transportation === option.value
-                            ? 'border-[#C47245] bg-[#C47245]/10'
-                            : 'border-[#E7E5E4] hover:border-[#C47245]/50'
-                        }`}>
+                        onClick={() => selectField('transportation', option.value)}
+                        className={cardGridButton(formData.transportation === option.value)}>
                         <div className="text-2xl mb-1">{option.icon}</div>
                         <div className="text-sm font-medium text-[#1C1917]">{option.label}</div>
                       </button>
@@ -239,11 +415,7 @@ const TripPlannerPage = ({ user }) => {
                   <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                     {ACCOMMODATION_OPTIONS.map(option => (
                       <div key={option} onClick={() => toggleArrayItem('accommodation', option)}
-                        className={`p-3 rounded-lg border-2 cursor-pointer transition-all ${
-                          formData.accommodation.includes(option)
-                            ? 'border-[#C47245] bg-[#C47245]/10'
-                            : 'border-[#E7E5E4] hover:border-[#C47245]/50'
-                        }`}>
+                        className={checkboxCard(formData.accommodation.includes(option))}>
                         <div className="flex items-center gap-2">
                           <Checkbox checked={formData.accommodation.includes(option)} />
                           <span className="text-sm text-[#1C1917]">{option}</span>
@@ -255,8 +427,227 @@ const TripPlannerPage = ({ user }) => {
               </motion.div>
             )}
 
-            {step === 3 && (
-              <motion.div key="step3" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }}
+            {currentStepKey === 'road' && (
+              <motion.div key="road" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: -20 }} className="space-y-6">
+                <h2 className="text-2xl font-medium text-[#2A4B5C] mb-6" style={{ fontFamily: 'Cormorant Garamond, serif' }}>
+                  Road Trip Details
+                </h2>
+
+                <div>
+                  <Label className="text-[#C47245] uppercase tracking-wider text-xs font-medium mb-3 block">Driver Details</Label>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                    {[
+                      ['road_drivers', 'Number of Drivers'],
+                      ['road_max_hours_before_break', 'Max Hours Before Break'],
+                      ['road_break_duration_minutes', 'Break Duration (min)'],
+                      ['road_max_driving_hours_per_day', 'Max Driving Hours/Day'],
+                    ].map(([field, label]) => (
+                      <div key={field}>
+                        <label className="text-sm text-[#57534E]">{label}</label>
+                        <Input type="number" min="0" step="1" value={formData[field]}
+                          onChange={(e) => setFormData({ ...formData, [field]: e.target.value === '' ? 0 : Number(e.target.value) })}
+                          className="border-[#E7E5E4] mt-1" />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <Label className="text-[#C47245] uppercase tracking-wider text-xs font-medium mb-3 block">Route Style</Label>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    {ROAD_ROUTE_STYLE_OPTIONS.map(opt => (
+                      <button key={opt} onClick={() => selectField('road_route_style', opt)}
+                        className={cardGridButton(formData.road_route_style === opt)}>
+                        <div className="text-sm font-medium text-[#1C1917]">{opt}</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <Label className="text-[#C47245] uppercase tracking-wider text-xs font-medium mb-3 block">Route Avoidances (optional)</Label>
+                  <div className="grid grid-cols-2 gap-3">
+                    {ROAD_ROUTE_AVOIDANCE_OPTIONS.map(opt => (
+                      <div key={opt} onClick={() => toggleArrayItem('road_route_avoidances', opt)}
+                        className={checkboxCard(formData.road_route_avoidances.includes(opt))}>
+                        <div className="flex items-center gap-2">
+                          <Checkbox checked={formData.road_route_avoidances.includes(opt)} />
+                          <span className="text-sm text-[#1C1917]">{opt}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <Label className="text-[#C47245] uppercase tracking-wider text-xs font-medium mb-3 block">Vehicle - Fuel Type</Label>
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                    {ROAD_FUEL_TYPE_OPTIONS.map(opt => (
+                      <button key={opt} onClick={() => selectField('road_fuel_type', opt)}
+                        className={cardGridButton(formData.road_fuel_type === opt)}>
+                        <div className="text-sm font-medium text-[#1C1917]">{opt}</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {formData.road_fuel_type === 'Electric' ? (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <Label className="text-[#C47245] uppercase tracking-wider text-xs font-medium">Current Battery %</Label>
+                      <Input type="number" min="0" max="100" value={formData.road_ev_battery_percent}
+                        onChange={(e) => setFormData({ ...formData, road_ev_battery_percent: e.target.value === '' ? 0 : Number(e.target.value) })}
+                        className="border-[#E7E5E4] mt-2" />
+                    </div>
+                    <div>
+                      <Label className="text-[#C47245] uppercase tracking-wider text-xs font-medium mb-3 block">Recharge Preference</Label>
+                      <div className="space-y-2">
+                        {ROAD_EV_RECHARGE_OPTIONS.map(opt => (
+                          <button key={opt} onClick={() => selectField('road_ev_recharge_preference', opt)}
+                            className={`w-full p-2 rounded-lg border-2 transition-all text-left text-sm ${
+                              formData.road_ev_recharge_preference === opt
+                                ? 'border-[#C47245] bg-[#C47245]/10'
+                                : 'border-[#E7E5E4] hover:border-[#C47245]/50'
+                            }`}>
+                            {opt}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div>
+                    <Label className="text-[#C47245] uppercase tracking-wider text-xs font-medium">Vehicle Mileage or Model</Label>
+                    <Input value={formData.road_vehicle_mileage_or_model}
+                      onChange={(e) => setFormData({ ...formData, road_vehicle_mileage_or_model: e.target.value })}
+                      placeholder="E.g., 18 km/l, or Toyota Innova"
+                      className="border-[#E7E5E4] mt-2" />
+                  </div>
+                )}
+
+                <div>
+                  <Label className="text-[#C47245] uppercase tracking-wider text-xs font-medium mb-3 block">Overnight Stop Accommodation</Label>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    {ROAD_OVERNIGHT_ACCOMMODATION_OPTIONS.map(opt => (
+                      <div key={opt} onClick={() => toggleArrayItem('road_overnight_accommodation', opt)}
+                        className={checkboxCard(formData.road_overnight_accommodation.includes(opt))}>
+                        <div className="flex items-center gap-2">
+                          <Checkbox checked={formData.road_overnight_accommodation.includes(opt)} />
+                          <span className="text-sm text-[#1C1917]">{opt}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <Label className="text-[#C47245] uppercase tracking-wider text-xs font-medium mb-3 block">Food Preference</Label>
+                  <div className="grid grid-cols-2 gap-3">
+                    {ROAD_FOOD_PREFERENCE_OPTIONS.map(opt => (
+                      <button key={opt} onClick={() => selectField('road_food_preference', opt)}
+                        className={cardGridButton(formData.road_food_preference === opt)}>
+                        <div className="text-sm font-medium text-[#1C1917]">{opt}</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <Label className="text-[#C47245] uppercase tracking-wider text-xs font-medium mb-3 block">Attractions You'd Enjoy Along the Route</Label>
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                    {ROAD_ROUTE_ATTRACTIONS_OPTIONS.map(opt => (
+                      <div key={opt} onClick={() => toggleArrayItem('road_route_attractions', opt)}
+                        className={checkboxCard(formData.road_route_attractions.includes(opt))}>
+                        <div className="flex items-center gap-2">
+                          <Checkbox checked={formData.road_route_attractions.includes(opt)} />
+                          <span className="text-sm text-[#1C1917]">{opt}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <Label className="text-[#C47245] uppercase tracking-wider text-xs font-medium mb-3 block">Things to Avoid</Label>
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                    {ROAD_AVOID_OPTIONS.map(opt => (
+                      <div key={opt} onClick={() => toggleArrayItem('road_avoid', opt)}
+                        className={checkboxCard(formData.road_avoid.includes(opt))}>
+                        <div className="flex items-center gap-2">
+                          <Checkbox checked={formData.road_avoid.includes(opt)} />
+                          <span className="text-sm text-[#1C1917]">{opt}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </motion.div>
+            )}
+
+            {currentStepKey === 'cruise' && (
+              <motion.div key="cruise" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: -20 }} className="space-y-6">
+                <h2 className="text-2xl font-medium text-[#2A4B5C] mb-6" style={{ fontFamily: 'Cormorant Garamond, serif' }}>
+                  Cruise Preferences
+                </h2>
+
+                <div>
+                  <Label className="text-[#C47245] uppercase tracking-wider text-xs font-medium mb-3 block">Cabin Type</Label>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    {CRUISE_CABIN_TYPE_OPTIONS.map(opt => (
+                      <button key={opt} onClick={() => selectField('cruise_cabin_type', opt)}
+                        className={cardGridButton(formData.cruise_cabin_type === opt)}>
+                        <div className="text-sm font-medium text-[#1C1917]">{opt}</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <Label className="text-[#C47245] uppercase tracking-wider text-xs font-medium mb-3 block">Cruise Duration Preference</Label>
+                  <div className="space-y-2">
+                    {CRUISE_DURATION_OPTIONS.map(opt => (
+                      <button key={opt} onClick={() => selectField('cruise_duration_preference', opt)}
+                        className={`w-full p-4 rounded-xl border-2 transition-all text-left ${
+                          formData.cruise_duration_preference === opt
+                            ? 'border-[#C47245] bg-[#C47245]/10'
+                            : 'border-[#E7E5E4] hover:border-[#C47245]/50'
+                        }`}>
+                        <div className="font-medium text-[#1C1917]">{opt}</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <Label className="text-[#C47245] uppercase tracking-wider text-xs font-medium mb-3 block">Dining Style</Label>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    {CRUISE_DINING_STYLE_OPTIONS.map(opt => (
+                      <button key={opt} onClick={() => selectField('cruise_dining_style', opt)}
+                        className={cardGridButton(formData.cruise_dining_style === opt)}>
+                        <div className="text-sm font-medium text-[#1C1917]">{opt}</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <Label className="text-[#C47245] uppercase tracking-wider text-xs font-medium mb-3 block">Itinerary Style</Label>
+                  <div className="grid grid-cols-2 gap-3">
+                    {CRUISE_ITINERARY_STYLE_OPTIONS.map(opt => (
+                      <button key={opt} onClick={() => selectField('cruise_itinerary_style', opt)}
+                        className={cardGridButton(formData.cruise_itinerary_style === opt)}>
+                        <div className="text-sm font-medium text-[#1C1917]">{opt}</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </motion.div>
+            )}
+
+            {currentStepKey === 'interests' && (
+              <motion.div key="interests" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }}
                 exit={{ opacity: 0, x: -20 }} className="space-y-6">
                 <h2 className="text-2xl font-medium text-[#2A4B5C] mb-6" style={{ fontFamily: 'Cormorant Garamond, serif' }}>
                   Interests & Activities
@@ -266,11 +657,7 @@ const TripPlannerPage = ({ user }) => {
                   <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                     {INTERESTS.map(interest => (
                       <div key={interest} onClick={() => toggleArrayItem('interests', interest)}
-                        className={`p-3 rounded-lg border-2 cursor-pointer transition-all ${
-                          formData.interests.includes(interest)
-                            ? 'border-[#C47245] bg-[#C47245]/10'
-                            : 'border-[#E7E5E4] hover:border-[#C47245]/50'
-                        }`}>
+                        className={checkboxCard(formData.interests.includes(interest))}>
                         <div className="flex items-center gap-2">
                           <Checkbox checked={formData.interests.includes(interest)} />
                           <span className="text-sm text-[#1C1917]">{interest}</span>
@@ -284,12 +671,8 @@ const TripPlannerPage = ({ user }) => {
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                     {TRIP_TYPES.map(type => (
                       <button key={type.value}
-                        onClick={() => setFormData({ ...formData, trip_type: type.value })}
-                        className={`p-4 rounded-xl border-2 transition-all ${
-                          formData.trip_type === type.value
-                            ? 'border-[#C47245] bg-[#C47245]/10'
-                            : 'border-[#E7E5E4] hover:border-[#C47245]/50'
-                        }`}>
+                        onClick={() => selectField('trip_type', type.value)}
+                        className={cardGridButton(formData.trip_type === type.value)}>
                         <div className="text-sm font-medium text-[#1C1917]">{type.label}</div>
                       </button>
                     ))}
@@ -298,8 +681,8 @@ const TripPlannerPage = ({ user }) => {
               </motion.div>
             )}
 
-            {step === 4 && (
-              <motion.div key="step4" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }}
+            {currentStepKey === 'details' && (
+              <motion.div key="details" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }}
                 exit={{ opacity: 0, x: -20 }} className="space-y-6">
                 <h2 className="text-2xl font-medium text-[#2A4B5C] mb-6" style={{ fontFamily: 'Cormorant Garamond, serif' }}>
                   Additional Details
@@ -323,12 +706,8 @@ const TripPlannerPage = ({ user }) => {
                   <div className="grid grid-cols-3 gap-3">
                     {['Relaxed', 'Moderate', 'Fast-paced'].map(pace => (
                       <button key={pace}
-                        onClick={() => setFormData({ ...formData, travel_pace: pace })}
-                        className={`p-3 rounded-lg border-2 transition-all ${
-                          formData.travel_pace === pace
-                            ? 'border-[#C47245] bg-[#C47245]/10'
-                            : 'border-[#E7E5E4] hover:border-[#C47245]/50'
-                        }`}>
+                        onClick={() => selectField('travel_pace', pace)}
+                        className={cardGridButton(formData.travel_pace === pace)}>
                         <div className="text-sm font-medium text-[#1C1917]">{pace}</div>
                       </button>
                     ))}
