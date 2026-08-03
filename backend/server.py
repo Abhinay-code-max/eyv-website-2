@@ -3113,24 +3113,35 @@ async def get_payment_status(session_id: str, request: Request):
     _ensure_stripe_configured()
     status_response = await asyncio.to_thread(stripe.checkout.Session.retrieve, session_id)
 
-    # Update transaction (idempotent - only process once)
-    if status_response.payment_status == 'paid' and transaction['payment_status'] != 'paid':
-        await db.payment_transactions.update_one(
-            {'session_id': session_id},
+    # Update transaction (idempotent - only process once). The webhook above
+    # can be racing this exact request for the same session_id (Stripe fires
+    # checkout.session.completed independently of whether/when the frontend
+    # happens to poll this endpoint) - a plain read-this-Python-variable-then-
+    # write is NOT enough to prevent double-processing (_process_successful_payment
+    # awarding points twice, etc.): both requests could read payment_status
+    # as still-pending before either one's write lands. The filter on
+    # payment_status in the update itself is what makes this atomic - only
+    # whichever request's update Mongo actually applies first gets a non-None
+    # result back, so only that one calls the (non-idempotent) side effects.
+    if status_response.payment_status == 'paid':
+        updated = await db.payment_transactions.find_one_and_update(
+            {'session_id': session_id, 'payment_status': {'$ne': 'paid'}},
             {'$set': {
                 'payment_status': 'paid',
                 'status': 'completed',
                 'completed_at': datetime.now(timezone.utc).isoformat(),
             }}
         )
-        # Trigger post-payment actions
-        await _process_successful_payment(transaction)
+        if updated is not None:
+            # Trigger post-payment actions
+            await _process_successful_payment(transaction)
     elif status_response.status == 'expired':
-        await db.payment_transactions.update_one(
-            {'session_id': session_id},
+        updated = await db.payment_transactions.find_one_and_update(
+            {'session_id': session_id, 'payment_status': {'$nin': ['paid', 'expired']}},
             {'$set': {'payment_status': 'expired', 'status': 'expired'}}
         )
-        await _process_expired_payment(transaction)
+        if updated is not None:
+            await _process_expired_payment(transaction)
     
     return {
         'payment_status': status_response.payment_status,
@@ -3343,16 +3354,27 @@ async def stripe_webhook(request: Request):
                 {'session_id': session_obj['id']},
                 {'_id': 0}
             )
-            if transaction and transaction['payment_status'] != 'paid':
-                await db.payment_transactions.update_one(
-                    {'session_id': session_obj['id']},
+            # Atomic find_one_and_update, not a read-then-write - this can
+            # race the /payments/status poll endpoint for the same
+            # session_id (Stripe's webhook delivery and the frontend's own
+            # poll are entirely independent of each other), and
+            # _process_successful_payment's side effects (awarding points,
+            # confirming bookings) are not themselves idempotent. Filtering
+            # payment_status into the update means only whichever request
+            # Mongo actually applies first gets a non-None result and
+            # proceeds to the side effects - see the matching comment on
+            # get_payment_status.
+            if transaction:
+                updated = await db.payment_transactions.find_one_and_update(
+                    {'session_id': session_obj['id'], 'payment_status': {'$ne': 'paid'}},
                     {'$set': {
                         'payment_status': 'paid',
                         'status': 'completed',
                         'completed_at': datetime.now(timezone.utc).isoformat(),
                     }}
                 )
-                await _process_successful_payment(transaction)
+                if updated is not None:
+                    await _process_successful_payment(transaction)
 
         elif event['type'] == 'checkout.session.expired':
             session_obj = event['data']['object']
@@ -3360,16 +3382,19 @@ async def stripe_webhook(request: Request):
                 {'session_id': session_obj['id']},
                 {'_id': 0}
             )
+            # Same atomic-update reasoning as checkout.session.completed above.
             # Guards against reprocessing on Stripe's at-least-once webhook
-            # redelivery, and against a stray/duplicate expired event ever
-            # touching a transaction a (possibly since-arrived) success
-            # event already marked paid.
-            if transaction and transaction['payment_status'] not in ('paid', 'expired'):
-                await db.payment_transactions.update_one(
-                    {'session_id': session_obj['id']},
+            # redelivery, against racing the /payments/status poll endpoint,
+            # and against a stray/duplicate expired event ever touching a
+            # transaction a (possibly since-arrived) success event already
+            # marked paid.
+            if transaction:
+                updated = await db.payment_transactions.find_one_and_update(
+                    {'session_id': session_obj['id'], 'payment_status': {'$nin': ['paid', 'expired']}},
                     {'$set': {'payment_status': 'expired', 'status': 'expired'}}
                 )
-                await _process_expired_payment(transaction)
+                if updated is not None:
+                    await _process_expired_payment(transaction)
 
         elif event['type'] in (
             'customer.subscription.created',

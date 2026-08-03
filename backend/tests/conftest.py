@@ -20,12 +20,19 @@ DB-seeding helpers.
 import asyncio
 import hashlib
 import os
+import sys
+import uuid
 from datetime import datetime, timezone, timedelta
 
+import pytest
 from motor.motor_asyncio import AsyncIOMotorClient
 
 MONGO_URL = os.environ.get('MONGO_URL', 'mongodb://localhost:27017')
 DB_NAME = os.environ.get('DB_NAME', 'test_database')
+
+BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if BACKEND_DIR not in sys.path:
+    sys.path.insert(0, BACKEND_DIR)
 
 
 def hash_session_token(token):
@@ -81,3 +88,54 @@ def delete_session(user_id, session_token):
         await db.user_sessions.delete_many({"session_token": hash_session_token(session_token)})
         await db.generation_quota.delete_many({"user_id": user_id})
     _run(_do())
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# In-process fixtures (new) - the pattern above (real uvicorn process +
+# `requests` + BASE_URL) is what every existing test file in this directory
+# still uses and stays untouched. These fixtures are an additive, parallel
+# path for new tests: FastAPI's TestClient talks to `server.app` directly
+# over ASGI, in the same process, against the same real Mongo this file's
+# helpers already write to - no subprocess, no port, no /health poll.
+#
+# `import server` is deliberately kept inside the fixture bodies rather than
+# at module level - conftest.py is auto-loaded for every file under tests/,
+# and server.py raises at import time if CORS_ORIGINS/WALLET_URL_SIGNING_SECRET
+# aren't set (see server.py's _resolve_cors_origins/_resolve_wallet_download_secret).
+# Fixtures are only evaluated when a test actually requests them, so a test
+# file that only needs seed_session/delete_session above still never pays
+# that import cost or those env-var requirements.
+# ─────────────────────────────────────────────────────────────────────────
+
+@pytest.fixture(scope="session")
+def client():
+    """In-process FastAPI TestClient - `with` form so startup/shutdown
+    lifespan events actually run (index_service.ensure_indexes, the FX-rate
+    warm-up, the booking-expiry scheduler), same as a real server boot."""
+    from starlette.testclient import TestClient
+    import server as server_module
+    with TestClient(server_module.app) as c:
+        yield c
+
+
+@pytest.fixture()
+def authed_client(client):
+    """A real authenticated session, created in-process - not a hardcoded
+    token. Seeds users/user_sessions the same way seed_session above does
+    (same collections, same hashing), but with a fresh uuid4 user_id/token
+    per test so tests never share or race over identity, and sets the
+    session as a cookie on `client` (matching how the real frontend
+    authenticates - see server._get_current_session, cookie checked before
+    the Authorization-header fallback the older HTTP tests use).
+
+    Yields (client, user_id) - most tests only need `client`, but the user_id
+    is handy for asserting against DB state the test itself seeded."""
+    user_id = f"test_inproc_{uuid.uuid4().hex[:12]}"
+    token = f"test_inproc_token_{uuid.uuid4().hex}"
+    seed_session(user_id, token)
+    client.cookies.set("session_token", token)
+    try:
+        yield client, user_id
+    finally:
+        client.cookies.delete("session_token")
+        delete_session(user_id, token)

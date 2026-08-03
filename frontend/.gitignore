@@ -8,6 +8,11 @@
 # testing
 /coverage
 
+# Playwright (frontend/e2e/) - generated locally/in CI, never committed
+/playwright-report
+/test-results
+/blob-report
+
 # production
 /build
 
