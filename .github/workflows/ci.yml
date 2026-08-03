@@ -54,18 +54,17 @@ jobs:
       # short-lived wallet download URLs) - any value works here, it just
       # needs to be present and stable for the duration of the job.
       WALLET_URL_SIGNING_SECRET: ci-placeholder-wallet-signing-secret-not-a-real-secret
-      # OpenAI/Gemini clients are lazy singletons (_get_openai_client /
-      # _get_gemini_client in server.py) - not required just to import
-      # server.py. backend_test.py's real-Gemini-touching tests
-      # (test_chat_stream_authorized, test_trip_generate_and_lifecycle) still
-      # run with this placeholder: the Gemini call fails ("API key not
-      # valid"), generate_single_plan/chat_stream both already have a
-      # graceful-degradation path for that (see test_plan_generation_crash.py),
-      # and neither test asserts on real generated content - only on the
-      # request lifecycle/shape. So they pass, just without exercising a real
-      # model call. Confirmed by running against a real Gemini key locally
-      # too (docker exec into the dev backend container) - same pass result.
-      OPENAI_API_KEY: sk-ci-placeholder-unused
+      # The Gemini client is a lazy singleton (_get_gemini_client in
+      # server.py) - not required just to import server.py.
+      # backend_test.py's real-Gemini-touching tests (test_chat_stream_authorized,
+      # test_trip_generate_and_lifecycle) still run with this placeholder: the
+      # Gemini call fails ("API key not valid"), generate_single_plan/chat_stream
+      # both already have a graceful-degradation path for that (see
+      # test_plan_generation_crash.py), and neither test asserts on real
+      # generated content - only on the request lifecycle/shape. So they
+      # pass, just without exercising a real model call. Confirmed by running
+      # against a real Gemini key locally too (docker exec into the dev
+      # backend container) - same pass result.
       GEMINI_API_KEY: ci-placeholder-unused
       # backend_test.py/test_new_features.py hit /trips/generate and
       # /search/flights|hotels, whose flight/hotel anchor-pricing tries
@@ -188,7 +187,6 @@ jobs:
       DB_NAME: ci_unit_test_database
       CORS_ORIGINS: http://localhost:3000
       WALLET_URL_SIGNING_SECRET: ci-placeholder-wallet-signing-secret-not-a-real-secret
-      OPENAI_API_KEY: sk-ci-placeholder-unused
       GEMINI_API_KEY: ci-placeholder-unused
     steps:
       - uses: actions/checkout@v4
@@ -244,7 +242,6 @@ jobs:
       DB_NAME: ci_e2e_test_database
       CORS_ORIGINS: http://localhost:3000
       WALLET_URL_SIGNING_SECRET: ci-placeholder-wallet-signing-secret-not-a-real-secret
-      OPENAI_API_KEY: sk-ci-placeholder-unused
       GEMINI_API_KEY: ci-placeholder-unused
       # Same caveat as backend-tests: without a real Stripe *test-mode*
       # secret, booking-flow.spec.js still passes (it accepts the app's own

@@ -27,7 +27,6 @@ from urllib.parse import urlencode
 from datetime import datetime, timezone, timedelta
 import httpx
 import asyncio
-from openai import AsyncOpenAI
 from google import genai
 from google.genai import types as genai_types
 import stripe
@@ -53,19 +52,8 @@ from slowapi.util import get_remote_address
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
-OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 GEMINI_MODEL = "gemini-2.5-flash"  # gemini-2.0-flash/-lite return 429 (zero free-tier quota) and gemini-1.5-flash is 404 on this API key/version
-
-
-@functools.lru_cache(maxsize=1)
-def _get_openai_client() -> AsyncOpenAI:
-    """Lazy singleton - kept for potential future switch-back, currently
-    unused. AsyncOpenAI(api_key=...) raises immediately if the key is
-    None (unset), so constructing this eagerly at import time meant a
-    missing OPENAI_API_KEY crashed the entire server at boot, not just
-    whatever would eventually use this client."""
-    return AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 
 @functools.lru_cache(maxsize=1)

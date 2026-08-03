@@ -1,10 +1,28 @@
 // Shallow smoke tests only - "is the app completely broken" before it
 // ships, not exhaustive UI coverage. See e2e/README.md for the auth-bypass
 // strategy (real Google OAuth can't run in CI).
+const fs = require('fs');
+const path = require('path');
 const { defineConfig, devices } = require('@playwright/test');
 
 const FRONTEND_URL = 'http://localhost:3000';
 const BACKEND_URL = 'http://localhost:8001';
+const BACKEND_DIR = path.join(__dirname, '..', 'backend');
+
+// Same venv-detection as e2e/seed.js - a bare `python` on PATH can resolve
+// to system Python (no project dependencies installed) even when the
+// backend's own venv exists right next to it, which silently breaks this
+// webServer entry with "No module named uvicorn" the moment nothing else
+// already has :8001 held open for reuseExistingServer to fall back on. CI
+// has no venv (ci.yml installs straight into the job's Python), hence the
+// fallback to a bare `python`.
+function pythonBin() {
+  const venvPython = process.platform === 'win32'
+    ? path.join(BACKEND_DIR, 'venv', 'Scripts', 'python.exe')
+    : path.join(BACKEND_DIR, 'venv', 'bin', 'python');
+  if (fs.existsSync(venvPython)) return venvPython;
+  return process.platform === 'win32' ? 'python' : 'python3';
+}
 
 module.exports = defineConfig({
   testDir: './e2e',
@@ -35,7 +53,7 @@ module.exports = defineConfig({
       cwd: __dirname,
     },
     {
-      command: 'python -m uvicorn server:app --port 8001',
+      command: `"${pythonBin()}" -m uvicorn server:app --port 8001`,
       url: `${BACKEND_URL}/health`,
       reuseExistingServer: !process.env.CI,
       timeout: 60_000,
