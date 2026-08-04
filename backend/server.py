@@ -19,8 +19,8 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
-from typing import List, Optional, Dict, Any
+from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator, ValidationError
+from typing import List, Optional, Dict, Any, Literal
 import uuid
 import secrets
 from urllib.parse import urlencode
@@ -39,7 +39,7 @@ from services import ignav_service as duffel_service  # Ignav replaces Sky Scrap
 from services import serpapi_hotels_service
 from services import price_cache_service
 from services import log_redaction
-from services import quota_service, usage_service
+from services import quota_service, usage_service, generation_log_service
 from services import chat_service
 from services import booking_expiry_service
 from services import index_service
@@ -990,31 +990,27 @@ def _scale_per_person_costs(itinerary: Dict[str, Any], num_travelers: int) -> No
     person's cost - scale them up to the full traveler count. Activities the
     AI tags pricing_type="flat_group" (a hired guide, a private car, a
     chartered boat) are one fixed cost regardless of group size and are left
-    untouched."""
+    untouched. Callers are expected to have already validated `itinerary`
+    against GeneratedPlanResponse, so every day/meal/activity here is
+    guaranteed present and correctly typed."""
     for day_data in itinerary.values():
-        if not isinstance(day_data, dict):
-            continue
-        for meal in day_data.get('meals', []):
-            if isinstance(meal, dict) and isinstance(meal.get('cost'), (int, float)):
-                meal['cost'] = meal['cost'] * num_travelers
-        for activity in day_data.get('activities', []):
-            if not isinstance(activity, dict):
-                continue
-            cost = activity.get('cost')
-            if not isinstance(cost, (int, float)) or cost <= 0:
-                continue
-            if activity.get('pricing_type') == 'flat_group':
+        for meal in day_data['meals']:
+            meal['cost'] = meal['cost'] * num_travelers
+        for activity in day_data['activities']:
+            cost = activity['cost']
+            if cost <= 0 or activity.get('pricing_type') == 'flat_group':
                 continue
             activity['cost'] = cost * num_travelers
 
 
 # Enforces the plan JSON's shape at generation time (Gemini structured
-# output - response_mime_type="application/json" + response_json_schema)
-# instead of only validating/fixing it after the fact. This is a reduction
-# in how often the post-generation shape-hardening below has to kick in,
-# not a replacement for it - structured output has occasionally been
-# observed to still deviate (e.g. under retries/edge-case prompts), so the
-# defensive isinstance checks in generate_single_plan stay as the backstop.
+# output - response_mime_type="application/json" + response_json_schema).
+# Structured output has occasionally been observed to still deviate from
+# this schema (e.g. under retries/edge-case prompts), so the parsed response
+# is also validated against GeneratedPlanResponse (below) before
+# generate_single_plan trusts it - a response that doesn't match either
+# schema is a real failure (raises, feeding the existing retry loop), not
+# something silently coerced into shape.
 #
 # "itinerary" keeps its existing day_1/day_2/... dict shape (verified live
 # against the Gemini API that additionalProperties correctly constrains
@@ -1107,6 +1103,93 @@ PLAN_RESPONSE_SCHEMA = {
     },
     "required": ["plan_type", "currency", "currency_symbol", "itinerary", "cost_breakdown", "total_cost", "highlights", "budget_tips"],
 }
+
+
+# Pydantic mirror of _DAY_SCHEMA/PLAN_RESPONSE_SCHEMA above, used to validate
+# the *parsed* response after generation completes. This is a second
+# definition of the same shape kept in sync by hand rather than derived from
+# one another: the raw dicts above have to stay exactly as they are because
+# they're proven to work as a Gemini response_json_schema (Gemini's
+# structured-output schema support does not accept Pydantic's $defs/$ref
+# nesting), while this model is what actually gates whether a response is
+# accepted. A response that parses as JSON but fails validation here is a
+# real generation failure - it's raised and caught by generate_single_plan's
+# retry loop, the same as any other exception from the Gemini call itself,
+# instead of being silently patched into a plausible-looking shape.
+class _GeneratedTransportation(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    mode: str
+    details: str = ""
+    cost: float
+
+
+class _GeneratedActivity(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    activity: str
+    cost: float
+    time: str = ""
+    location: str = ""
+    category: str = ""
+    pricing_type: Optional[Literal["per_person", "flat_group"]] = None
+
+
+class _GeneratedAccommodation(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    name: str
+    cost: float
+    type: str = ""
+    location: str = ""
+
+
+class _GeneratedMeal(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    cost: float
+    time: str = ""
+    restaurant: str = ""
+    cuisine: str = ""
+
+
+class _GeneratedDay(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    date: str
+    transportation: _GeneratedTransportation
+    accommodation: _GeneratedAccommodation
+    meals: List[_GeneratedMeal]
+    activities: List[_GeneratedActivity]
+    daily_total: Optional[float] = None
+    cumulative_total: Optional[float] = None
+    fixed_costs: Optional[float] = None
+    variable_costs: Optional[float] = None
+
+
+class _GeneratedCostBreakdown(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    transportation: float
+    accommodation: float
+    food: float
+    activities: float
+    miscellaneous: float
+
+
+class GeneratedPlanResponse(BaseModel):
+    """Validated shape of generate_single_plan's parsed Gemini response -
+    see the comment above _GeneratedTransportation for why this exists
+    alongside PLAN_RESPONSE_SCHEMA rather than being derived from it."""
+    model_config = ConfigDict(extra="ignore")
+    plan_type: str
+    currency: str
+    currency_symbol: str
+    itinerary: Dict[str, _GeneratedDay]
+    cost_breakdown: _GeneratedCostBreakdown
+    total_cost: float
+    highlights: List[str]
+    budget_tips: List[str]
+
+    @model_validator(mode="after")
+    def _require_at_least_one_day(self):
+        if not self.itinerary:
+            raise ValueError("itinerary must contain at least one day")
+        return self
 
 
 def _transport_mode_flags(preferences: Dict) -> tuple:
@@ -1604,6 +1687,21 @@ CRUISE PREFERENCES (reflect these in the itinerary's activities/highlights text 
         vehicle_note = (preferences.get("road_vehicle_mileage_or_model") or "").strip()
         if vehicle_note:
             road_lines.append(f"- Vehicle: {vehicle_note}")
+        max_hours_before_break = preferences.get("road_max_hours_before_break")
+        break_duration_minutes = preferences.get("road_break_duration_minutes")
+        if max_hours_before_break or break_duration_minutes:
+            hours_part = f"every {max_hours_before_break} hour(s)" if max_hours_before_break else "regularly"
+            duration_part = f" for {break_duration_minutes} minute(s)" if break_duration_minutes else ""
+            road_lines.append(f"- Breaks: stop {hours_part}{duration_part} - reflect these stops in the day's activities")
+        fuel_type = (preferences.get("road_fuel_type") or "").strip()
+        if fuel_type:
+            road_lines.append(f"- Fuel type: {fuel_type}")
+        ev_battery_percent = preferences.get("road_ev_battery_percent")
+        if ev_battery_percent is not None:
+            road_lines.append(f"- Starting EV battery: {ev_battery_percent}% - factor in charging stops if the route needs them")
+        ev_recharge_preference = (preferences.get("road_ev_recharge_preference") or "").strip()
+        if ev_recharge_preference:
+            road_lines.append(f"- EV recharge preference: {ev_recharge_preference}")
         road_flavor_block = (
             "ROAD TRIP PREFERENCES (reflect these in the itinerary's activities/highlights text - "
             "they do not change the price above):\n" + "\n".join(road_lines) + "\n"
@@ -1754,45 +1852,38 @@ MEAL AND ACTIVITY PRICING (group size = {num_travelers}):
             if chunk.text:
                 full_response += chunk.text
 
-        # Parse JSON
-        start_i = full_response.find('{')
-        end_i   = full_response.rfind('}') + 1
-        if start_i != -1 and end_i > start_i:
-            plan_data = json.loads(full_response[start_i:end_i])
-        else:
-            raise ValueError("No JSON found in response")
+        # Parse + validate. response_mime_type="application/json" already
+        # constrains Gemini's token-level output, so the raw text is expected
+        # to be clean JSON - no substring extraction needed. model_validate
+        # against GeneratedPlanResponse is the real gate: a response that
+        # parses as JSON but doesn't match the expected shape (wrong types,
+        # missing required fields, zero days) raises here and is caught by
+        # the except block below, feeding the same retry-then-fail path as
+        # any other generation failure - it is never silently coerced into a
+        # plausible-looking plan.
+        plan_data_raw = json.loads(full_response)
+        try:
+            validated = GeneratedPlanResponse.model_validate(plan_data_raw)
+        except ValidationError as e:
+            raise ValueError(f"{plan_type}: response failed schema validation: {e}") from e
+        plan_data = validated.model_dump()
+
+        await generation_log_service.log_generation_attempt(
+            db, trip_id=trip_id, plan_type=plan_type, attempt=attempt + 1, model=GEMINI_MODEL,
+            status="success", prompt=prompt, response_text=full_response,
+            dietary_preferences=dietary_preferences, accessibility_requirements=accessibility_requirements,
+        )
 
         # ── Step 5: Post-process — enforce exact prices regardless of AI output
         logger.info(f"{plan_type}: anchor {anchor_transport_label}_price={anchor_transport_price}, hotel_price={hotel_price_per_night}")
         logger.info(f"{plan_type}: AI day_1 transport cost before fix = {plan_data.get('itinerary', {}).get('day_1', {}).get('transportation', {}).get('cost', 'N/A')}")
 
-        # The AI is asked to return "itinerary" as an object keyed by day_1,
-        # day_2, ... with each day and its nested transportation/accommodation
-        # as objects - but it doesn't always comply (e.g. an empty list `[]`
-        # instead of `{}` for a day with no separate transport). Every write
-        # below assumes those shapes, so normalize them here rather than let
-        # a bracket-assignment into a wrongly-typed value crash the whole
-        # generation (see "list indices must be integers or slices" crash).
-        if not isinstance(plan_data.get('itinerary'), dict):
-            plan_data['itinerary'] = {}
+        # Every day/transportation/accommodation/meal/activity below is
+        # guaranteed present and correctly typed by GeneratedPlanResponse
+        # validation above - no isinstance guards needed here anymore.
         itinerary = plan_data['itinerary']
-        for day_key, day_val in list(itinerary.items()):
-            if not isinstance(day_val, dict):
-                itinerary[day_key] = {}
-
-        # A response that parsed as valid JSON but came back with zero days
-        # (itinerary was `{}`, `null`, or a wrongly-typed value normalized to
-        # `{}` above) is not a usable plan - raising here (instead of letting
-        # it fall through to status='ready') routes it through the same
-        # retry-then-fail path below as any other malformed response, so it
-        # ends up "generation_failed": True rather than a "ready" plan with
-        # nothing in it.
-        if not itinerary:
-            raise ValueError(f"{plan_type}: AI returned an empty itinerary (zero days)")
 
         if anchor_transport_price > 0:
-            if not isinstance(plan_data.get('cost_breakdown'), dict):
-                plan_data['cost_breakdown'] = {}
             plan_data['cost_breakdown']['transportation'] = anchor_transport_price
 
             days = sorted(itinerary.keys())
@@ -1800,22 +1891,17 @@ MEAL AND ACTIVITY PRICING (group size = {num_travelers}):
             if days:
                 # Day 1: outbound transport
                 d1 = itinerary[days[0]]
-                if 'transportation' in d1:
-                    if not isinstance(d1['transportation'], dict):
-                        d1['transportation'] = {}
-                    d1['transportation']['cost'] = anchor_transport_price
-                    d1['transportation']['mode'] = anchor_transport_label
-                    if is_train:
-                        d1['transportation']['details'] = f"{train_name} ({train_class}) - {preferences.get('starting_location','')} to {preferences['destination']}"
-                    elif is_cruise:
-                        d1['transportation']['details'] = f"{cruise_cabin_type} cabin cruise - {preferences.get('starting_location','')} to {preferences['destination']}"
-                    elif is_road:
-                        d1['transportation']['details'] = f"Self-drive - {preferences.get('starting_location','')} to {preferences['destination']} (~{road_distance_km:.0f} km)"
-                    else:
-                        d1['transportation']['details'] = f"{flight_airline} {flight_number} - {d1['transportation'].get('details', '')}"
-                for act in d1.get('activities', []):
-                    if not isinstance(act, dict):
-                        continue
+                d1['transportation']['cost'] = anchor_transport_price
+                d1['transportation']['mode'] = anchor_transport_label
+                if is_train:
+                    d1['transportation']['details'] = f"{train_name} ({train_class}) - {preferences.get('starting_location','')} to {preferences['destination']}"
+                elif is_cruise:
+                    d1['transportation']['details'] = f"{cruise_cabin_type} cabin cruise - {preferences.get('starting_location','')} to {preferences['destination']}"
+                elif is_road:
+                    d1['transportation']['details'] = f"Self-drive - {preferences.get('starting_location','')} to {preferences['destination']} (~{road_distance_km:.0f} km)"
+                else:
+                    d1['transportation']['details'] = f"{flight_airline} {flight_number} - {d1['transportation'].get('details', '')}"
+                for act in d1['activities']:
                     kw = anchor_transport_label
                     if kw in act.get('activity', '').lower() or 'depart' in act.get('activity', '').lower():
                         act['cost'] = anchor_transport_price
@@ -1830,8 +1916,6 @@ MEAL AND ACTIVITY PRICING (group size = {num_travelers}):
                 # change needed.
                 if len(days) > 1:
                     dl = itinerary[days[-1]]
-                    if not isinstance(dl.get('transportation'), dict):
-                        dl['transportation'] = {}
                     if is_one_way:
                         dl['transportation']['cost'] = 0
                         dl['transportation']['mode'] = anchor_transport_label
@@ -1849,10 +1933,9 @@ MEAL AND ACTIVITY PRICING (group size = {num_travelers}):
                             dl['transportation']['details'] = f"Return {flight_airline} {flight_number} - {preferences['destination']} to {preferences.get('starting_location','')}"
 
         if hotel_price_per_night > 0:
-            for day_key, day_data in itinerary.items():
-                if isinstance(day_data, dict) and 'accommodation' in day_data and isinstance(day_data['accommodation'], dict):
-                    day_data['accommodation']['cost'] = hotel_price_per_night
-                    day_data['accommodation']['name'] = hotel_name or day_data['accommodation'].get('name', 'Hotel')
+            for day_data in itinerary.values():
+                day_data['accommodation']['cost'] = hotel_price_per_night
+                day_data['accommodation']['name'] = hotel_name or day_data['accommodation'].get('name', 'Hotel')
 
         # Meals and per-person activities come back from the AI as a single person's
         # cost regardless of what the prompt asked - enforce the group scaling here
@@ -1863,7 +1946,6 @@ MEAL AND ACTIVITY PRICING (group size = {num_travelers}):
         # Recalculate per-day totals AND the top-level cost_breakdown/total_cost from
         # the same pass over the (now anchor-corrected) itinerary, so the two can never
         # drift apart the way AI-authored daily_total/cumulative_total can.
-        itinerary = plan_data.get('itinerary', {})
         day_keys_sorted = sorted(itinerary.keys())
 
         real_transport = 0
@@ -1874,18 +1956,11 @@ MEAL AND ACTIVITY PRICING (group size = {num_travelers}):
 
         for day_key in day_keys_sorted:
             day_data = itinerary[day_key]
-            if not isinstance(day_data, dict):
-                day_data = {}
-                itinerary[day_key] = day_data
 
-            t = day_data.get('transportation', {})
-            day_transport = t.get('cost', 0) if isinstance(t, dict) else 0
-
-            a = day_data.get('accommodation', {})
-            day_accommodation = a.get('cost', 0) if isinstance(a, dict) else 0
-
-            day_food = sum(meal.get('cost', 0) for meal in day_data.get('meals', []) if isinstance(meal, dict))
-            day_activities = sum(act.get('cost', 0) for act in day_data.get('activities', []) if isinstance(act, dict))
+            day_transport = day_data['transportation']['cost']
+            day_accommodation = day_data['accommodation']['cost']
+            day_food = sum(meal['cost'] for meal in day_data['meals'])
+            day_activities = sum(act['cost'] for act in day_data['activities'])
 
             day_fixed = day_transport + day_accommodation
             day_variable = day_food + day_activities
@@ -1937,6 +2012,11 @@ MEAL AND ACTIVITY PRICING (group size = {num_travelers}):
       except Exception as e:
             last_error = e
             logger.warning(f"Attempt {attempt + 1}/{max_attempts} failed for {plan_type} plan: {e}")
+            await generation_log_service.log_generation_attempt(
+                db, trip_id=trip_id, plan_type=plan_type, attempt=attempt + 1, model=GEMINI_MODEL,
+                status="failed", prompt=prompt, response_text=locals().get('full_response', ''), error=str(e),
+                dietary_preferences=dietary_preferences, accessibility_requirements=accessibility_requirements,
+            )
 
     # All attempts genuinely failed - surface this as a distinct failure state
     # rather than a "successful" zero-cost plan. The zero-cost shape used to be

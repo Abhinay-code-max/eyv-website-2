@@ -274,3 +274,15 @@ Being direct about the current state rather than overselling it:
   provider quotes — there's no accessible real-time inventory API for
   either, and this is surfaced honestly to the user in the UI
   (`*_placeholder_pricing` flags), not hidden.
+- Itinerary generation and hotel-search pricing disagree on how many
+  nights a `departure_date`/`return_date` range covers. `generate_single_plan`
+  treats `return_date` as its own full itinerary day and force-charges a
+  full night's accommodation on it (confirmed by
+  `test_pricing_recompute_invariant.py`/`test_cruise_pricing.py`, and by
+  live Gemini eval runs — a 3-day date gap consistently produced 4
+  itinerary days). `serpapi_hotels_service.py`/`amadeus_service.py`
+  compute nights as a plain `(check_out - check_in).days`, no `+1`. Same
+  dates, two different night counts — a generated itinerary's
+  accommodation total ends up one night pricier than what the
+  hotel-search step itself would quote for the identical stay. Not fixed
+  yet, tracked here so it doesn't get lost.

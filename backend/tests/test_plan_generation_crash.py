@@ -12,18 +12,20 @@ for day_1 (which is why that log line succeeded), but elsewhere returned a bare
 `some_dict['key'] = value` without checking the AI actually gave it a dict,
 so a stray list crashed the whole generation.
 
-Because all three tiers (Budget/Premium/Luxury) call this same function with
-the same fix-up code, the malformed shape is not tier-specific - any tier can
-hit it depending on what shape the model happens to return that call. These
-tests reproduce both confirmed variants directly against generate_single_plan,
-with the Gemini call mocked to return the exact malformed shape, and confirm
-generation now completes instead of crashing.
-
-Before this fix, all attempts would fail, generate_single_plan would swallow
-the error and return a "successful-looking" plan with itinerary={} and every
-cost at 0 - which is what the frontend showed as a stuck "Itinerary is being
-generated" placeholder. These tests also confirm that path is gone: a plan
-that generates cleanly does NOT come back with generation_failed=True.
+generate_single_plan now validates the parsed response against
+GeneratedPlanResponse (a Pydantic model, see server.py) before any of that
+cost-correction code runs. A malformed shape - including both variants that
+caused the original crash - now fails validation and is treated as a real
+generation failure, feeding the existing retry loop, the same as a network
+error from Gemini would. This is a deliberate behavior change from an
+earlier version of these tests: malformed shapes used to be silently
+coerced into an empty dict and the generation allowed to "succeed" with
+degraded content; they now fail cleanly instead. Since the fake Gemini
+client below returns the same malformed shape on every retry, all 3
+attempts are exhausted and generate_single_plan returns its documented
+failure shape (generation_failed=True) - what these tests confirm is that
+this happens instead of an unhandled crash, and that a well-formed response
+still succeeds normally.
 """
 import asyncio
 import json
@@ -50,11 +52,14 @@ PREFS = dict(
 
 class _FakeModels:
     """Stands in for gemini_client.aio.models - streams back a single chunk
-    containing the full (malformed) JSON response."""
+    containing the full JSON response on every call, and counts how many
+    times generation was attempted."""
     def __init__(self, response_text):
         self._response_text = response_text
+        self.call_count = 0
 
     async def generate_content_stream(self, *args, **kwargs):
+        self.call_count += 1
         async def _gen():
             yield SimpleNamespace(text=self._response_text)
         return _gen()
@@ -74,16 +79,24 @@ async def _noop_log_usage(*args, **kwargs):
     return None
 
 
+async def _noop_log_generation(*args, **kwargs):
+    return None
+
+
 async def _no_hotels(*args, **kwargs):
     return None  # forces hotel_price_per_night = 0, skipping the hotel fix-up path
 
 
-def _run_with_mocked_ai(monkeypatch, malformed_plan: dict) -> dict:
-    fake_client = _FakeGeminiClient(json.dumps(malformed_plan))
+def _run_with_mocked_ai(monkeypatch, plan: dict) -> tuple:
+    """Returns (result, fake_client) so callers can assert on both the
+    returned plan and how many times generation was attempted."""
+    fake_client = _FakeGeminiClient(json.dumps(plan))
     monkeypatch.setattr(server, "_get_gemini_client", lambda: fake_client)
     monkeypatch.setattr(server.usage_service, "log_usage", _noop_log_usage)
+    monkeypatch.setattr(server.generation_log_service, "log_generation_attempt", _noop_log_generation)
     monkeypatch.setattr(server.serpapi_hotels_service, "search_hotels", _no_hotels)
-    return asyncio.run(server.generate_single_plan(dict(PREFS), "Premium", "trip_test_crash", "user_test"))
+    result = asyncio.run(server.generate_single_plan(dict(PREFS), "Premium", "trip_test_crash", "user_test"))
+    return result, fake_client
 
 
 def _base_itinerary_day(cost=1200):
@@ -98,10 +111,10 @@ def _base_itinerary_day(cost=1200):
     }
 
 
-def test_cost_breakdown_as_list_does_not_crash(monkeypatch):
-    """Reproduces the crash when the AI returns "cost_breakdown" as a bare
-    list (`[]`) instead of an object - `plan_data['cost_breakdown']['transportation'] = ...`
-    used to raise "list indices must be integers or slices, not str"."""
+def test_cost_breakdown_as_list_fails_cleanly_not_crash(monkeypatch):
+    """Reproduces the original crash trigger - "cost_breakdown" as a bare
+    list (`[]`) instead of an object. Now caught by schema validation before
+    the cost-correction code (which used to crash on it) ever runs."""
     malformed_plan = {
         "plan_type": "Premium",
         "currency": "INR",
@@ -116,17 +129,19 @@ def test_cost_breakdown_as_list_does_not_crash(monkeypatch):
         "budget_tips": ["t1"],
     }
 
-    result = _run_with_mocked_ai(monkeypatch, malformed_plan)
+    result, fake_client = _run_with_mocked_ai(monkeypatch, malformed_plan)
 
-    assert result.get("generation_failed") is not True, result.get("error")
-    assert isinstance(result["cost_breakdown"], dict)
-    assert result["cost_breakdown"]["transportation"] > 0
+    # No unhandled exception (asyncio.run above would have raised one), and
+    # every retry was genuinely attempted rather than giving up early.
+    assert fake_client.aio.models.call_count == 3
+    assert result["status"] == "failed"
+    assert result["generation_failed"] is True
+    assert result["itinerary"] == {}
 
 
-def test_last_day_transportation_as_list_does_not_crash(monkeypatch):
-    """Reproduces the crash when a later day's "transportation" comes back as
-    `[]` instead of an object - `dl['transportation']['cost'] = ...` used to
-    raise the same TypeError once the fix-up code reached the return-day block."""
+def test_last_day_transportation_as_list_fails_cleanly_not_crash(monkeypatch):
+    """Reproduces the other original crash trigger - a later day's
+    "transportation" as `[]` instead of an object."""
     malformed_plan = {
         "plan_type": "Premium",
         "currency": "INR",
@@ -148,9 +163,37 @@ def test_last_day_transportation_as_list_does_not_crash(monkeypatch):
         "budget_tips": ["t1"],
     }
 
-    result = _run_with_mocked_ai(monkeypatch, malformed_plan)
+    result, fake_client = _run_with_mocked_ai(monkeypatch, malformed_plan)
 
+    assert fake_client.aio.models.call_count == 3
+    assert result["status"] == "failed"
+    assert result["generation_failed"] is True
+
+
+def test_well_formed_response_still_succeeds(monkeypatch):
+    """Guards the happy path against the validation change above - a
+    correctly-shaped response must still produce a ready plan, not a false
+    positive failure."""
+    valid_plan = {
+        "plan_type": "Premium",
+        "currency": "INR",
+        "currency_symbol": "₹",
+        "itinerary": {
+            "day_1": _base_itinerary_day(),
+            "day_2": _base_itinerary_day(),
+        },
+        "cost_breakdown": {"transportation": 1200, "accommodation": 5000, "food": 500, "activities": 0, "miscellaneous": 0},
+        "total_cost": 6700,
+        "highlights": ["h1"],
+        "budget_tips": ["t1"],
+    }
+
+    result, fake_client = _run_with_mocked_ai(monkeypatch, valid_plan)
+
+    # Succeeds on the first attempt - no retries needed for a valid response.
+    assert fake_client.aio.models.call_count == 1
     assert result.get("generation_failed") is not True, result.get("error")
+    assert result["status"] == "ready"
     day_1 = result["itinerary"]["day_1"]
     day_2 = result["itinerary"]["day_2"]
     assert isinstance(day_2["transportation"], dict)
