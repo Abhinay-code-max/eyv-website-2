@@ -16,12 +16,17 @@ test('Google sign-in button navigates away to start the OAuth flow', async ({ pa
   const googleButton = page.getByTestId('google-login-button');
   await expect(googleButton).toBeVisible();
 
+  const frontendOrigin = new URL(page.url()).origin;
   await googleButton.click();
   // window.location.href assignment is a real full-page navigation, not a
-  // React Router route change - the SPA's /login URL must actually be left
+  // React Router route change - the SPA's origin must actually be left
   // behind, proving the click is wired to something real (whether that
   // lands on Google's consent screen or the backend's own "OAuth not
   // configured" error in an environment with no real Google credentials -
-  // either way it left the SPA, which is what this smoke check cares about).
-  await page.waitForURL((url) => !url.pathname.endsWith('/login'), { timeout: 10_000 });
+  // either way it left the SPA's origin, which is what this smoke check
+  // cares about). Checking origin rather than pathname - a pathname
+  // endsWith('/login') check produces a false negative when the backend's
+  // own error response is served at a path that also ends in "/login"
+  // (e.g. /api/auth/google/login, the unconfigured-OAuth case CI hits).
+  await page.waitForURL((url) => url.origin !== frontendOrigin, { timeout: 10_000 });
 });
