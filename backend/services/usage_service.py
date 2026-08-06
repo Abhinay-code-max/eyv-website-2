@@ -24,22 +24,16 @@ async def log_usage(db, provider: str, user_id: Optional[str] = None, meta: Opti
         await db.provider_usage.insert_one({
             "provider": provider,
             "user_id": user_id,
-            "created_at": datetime.now(timezone.utc),
+            "created_at": datetime.now(timezone.utc).isoformat(),
             "meta": meta or {},
         })
     except Exception as e:
         logger.warning(f"Failed to log provider usage ({provider}): {e}")
 
 
-async def _counts_since(db, since: datetime) -> dict:
-    # `since` must be a native datetime, matching how created_at is now
-    # written above - see migrations/0001_normalize_timestamps_to_datetime.py
-    # for why this matters: a Date $gte query against a still-string
-    # created_at (pre-migration data) does not compare chronologically at
-    # all (MongoDB compares by BSON type when types differ), so this would
-    # silently undercount until the database is migrated.
+async def _counts_since(db, since_iso: str) -> dict:
     pipeline = [
-        {"$match": {"created_at": {"$gte": since}}},
+        {"$match": {"created_at": {"$gte": since_iso}}},
         {"$group": {"_id": "$provider", "count": {"$sum": 1}}},
     ]
     rows = await db.provider_usage.aggregate(pipeline).to_list(None)
@@ -52,7 +46,7 @@ async def get_usage_summary(db) -> dict:
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week_start = today_start - timedelta(days=7)
     return {
-        "today": await _counts_since(db, today_start),
-        "last_7_days": await _counts_since(db, week_start),
+        "today": await _counts_since(db, today_start.isoformat()),
+        "last_7_days": await _counts_since(db, week_start.isoformat()),
         "generated_at": now.isoformat(),
     }

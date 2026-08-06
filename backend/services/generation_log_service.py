@@ -60,7 +60,7 @@ async def log_generation_attempt(
             "prompt": _redact(prompt, dietary_preferences, accessibility_requirements),
             "response": _redact(response_text, dietary_preferences, accessibility_requirements),
             "error": error,
-            "created_at": datetime.now(timezone.utc),
+            "created_at": datetime.now(timezone.utc).isoformat(),
         })
     except Exception as e:
         logger.warning(f"Failed to log generation attempt for trip {trip_id}: {e}")

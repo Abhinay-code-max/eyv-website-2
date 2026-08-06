@@ -29,23 +29,13 @@ async def expire_stale_pending_bookings(db) -> int:
     by an earlier run or a webhook is simply not touched again.
 
     Returns the number of bookings flipped, for logging/observability.
-
-    DEPLOY ORDER NOTE: `created_at` used to be stored as an ISO string on
-    every booking (see migrations/0001_normalize_timestamps_to_datetime.py) -
-    this query now compares it against a native datetime, which is only
-    correct once that migration has actually run. MongoDB compares by BSON
-    type when types differ (String sorts before Date), so a Date `$lt`
-    query against a still-string `created_at` would match every legacy
-    booking regardless of age - migrate the database BEFORE deploying this
-    code, not after, or this sweep will incorrectly flip every unmigrated
-    pending booking to payment_failed on its first run.
     """
-    cutoff = datetime.now(timezone.utc) - STALE_PENDING_TTL
+    cutoff = (datetime.now(timezone.utc) - STALE_PENDING_TTL).isoformat()
     result = await db.bookings.update_many(
         {"status": "pending_payment", "created_at": {"$lt": cutoff}},
         {"$set": {
             "status": "payment_failed",
-            "payment_failed_at": datetime.now(timezone.utc),
+            "payment_failed_at": datetime.now(timezone.utc).isoformat(),
         }},
     )
     if result.modified_count:

@@ -606,7 +606,7 @@ async def exchange_session(request: SessionExchangeRequest, response: Response, 
                 "email": session_data["email"],
                 "name": session_data["name"],
                 "picture": session_data.get("picture"),
-                "created_at": datetime.now(timezone.utc),
+                "created_at": datetime.now(timezone.utc).isoformat()
             }
             await db.users.insert_one(user_doc)
 
@@ -628,7 +628,7 @@ async def exchange_session(request: SessionExchangeRequest, response: Response, 
             # Native datetime (not .isoformat()) - the TTL index in
             # index_service.py needs a real BSON Date to expire these.
             "expires_at": expires_at,
-            "created_at": datetime.now(timezone.utc),
+            "created_at": datetime.now(timezone.utc).isoformat(),
             "user_agent": http_request.headers.get("user-agent"),
         }
         await db.user_sessions.insert_one(session_doc)
@@ -775,7 +775,7 @@ async def _generate_and_save_tier(
     plan = await generate_single_plan(preferences_dict, plan_type, trip_id, user_id, **shared_kwargs)
     await db.trips.update_one(
         {"trip_id": trip_id, "user_id": user_id},
-        {"$set": {f"plans.{plan_index}": plan, "updated_at": datetime.now(timezone.utc)}},
+        {"$set": {f"plans.{plan_index}": plan, "updated_at": datetime.now(timezone.utc).isoformat()}},
     )
 
 
@@ -815,8 +815,8 @@ async def generate_trip_plans(preferences: TripPreferences, request: Request):
         "trip_name": f"{preferences.destination} Trip",
         "preferences": preferences_dict,
         "plans": placeholder_plans,
-        "created_at": datetime.now(timezone.utc),
-        "updated_at": datetime.now(timezone.utc),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat()
     }
     await db.trips.insert_one(saved_trip)
 
@@ -900,7 +900,7 @@ async def regenerate_trip_plan(trip_id: str, plan_type: str, request: Request):
 
     await db.trips.update_one(
         {"trip_id": trip_id, "user_id": user.user_id},
-        {"$set": {f"plans.{plan_index}": regenerated, "updated_at": datetime.now(timezone.utc)}},
+        {"$set": {f"plans.{plan_index}": regenerated, "updated_at": datetime.now(timezone.utc).isoformat()}},
     )
 
     return {"trip_id": trip_id, "plan_type": plan_type, "plan": regenerated}
@@ -2571,7 +2571,7 @@ async def create_booking(req: BookingRequest, request: Request):
         "payment_status": "mock_paid",
         "total_amount": resolved["price"],
         "currency": resolved["currency"],
-        "created_at": datetime.now(timezone.utc),
+        "created_at": datetime.now(timezone.utc).isoformat()
     }
 
     await db.bookings.insert_one(booking_doc)
@@ -2713,7 +2713,7 @@ async def book_trip_plan(trip_id: str, plan_type: str, request: Request):
         "payment_status": "mock_paid",
         "total_amount": total_amount,
         "currency": plan.get('currency', 'INR'),
-        "created_at": datetime.now(timezone.utc),
+        "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
     await db.bookings.insert_one(booking_doc)
@@ -2748,7 +2748,7 @@ async def cancel_booking(booking_id: str, request: Request):
     user = await get_current_user(request)
     result = await db.bookings.update_one(
         {"booking_id": booking_id, "user_id": user.user_id},
-        {"$set": {"status": "cancelled", "cancelled_at": datetime.now(timezone.utc)}}
+        {"$set": {"status": "cancelled", "cancelled_at": datetime.now(timezone.utc).isoformat()}}
     )
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Booking not found")
@@ -2850,7 +2850,7 @@ async def upload_wallet_item(
         "description": description,
         "trip_id": trip_id,
         "is_deleted": False,
-        "created_at": datetime.now(timezone.utc),
+        "created_at": datetime.now(timezone.utc).isoformat()
     }
     await db.wallet_items.insert_one(item_doc)
     item_doc.pop("_id", None)
@@ -2936,7 +2936,7 @@ async def delete_wallet_item(item_id: str, request: Request):
     user = await get_current_user(request)
     result = await db.wallet_items.update_one(
         {"item_id": item_id, "user_id": user.user_id},
-        {"$set": {"is_deleted": True, "deleted_at": datetime.now(timezone.utc)}}
+        {"$set": {"is_deleted": True, "deleted_at": datetime.now(timezone.utc).isoformat()}}
     )
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Item not found")
@@ -3143,7 +3143,7 @@ async def create_checkout(req: CreateCheckoutRequest, request: Request):
         'payment_status': 'pending',
         'status': 'initiated',
         'points_used': req.use_points,
-        'created_at': datetime.now(timezone.utc),
+        'created_at': datetime.now(timezone.utc).isoformat(),
     }
     await db.payment_transactions.insert_one(transaction)
     
@@ -3197,7 +3197,7 @@ async def get_payment_status(session_id: str, request: Request):
             {'$set': {
                 'payment_status': 'paid',
                 'status': 'completed',
-                'completed_at': datetime.now(timezone.utc),
+                'completed_at': datetime.now(timezone.utc).isoformat(),
             }}
         )
         if updated is not None:
@@ -3266,7 +3266,7 @@ async def _process_successful_payment(transaction: Dict):
                 {'$set': {
                     'status': 'confirmed',
                     'payment_status': 'paid',
-                    'paid_at': datetime.now(timezone.utc),
+                    'paid_at': datetime.now(timezone.utc).isoformat(),
                 }}
             )
             
@@ -3326,7 +3326,7 @@ async def _process_expired_payment(transaction: Dict):
         {'booking_id': booking_id, 'status': 'pending_payment'},
         {'$set': {
             'status': 'payment_failed',
-            'payment_failed_at': datetime.now(timezone.utc),
+            'payment_failed_at': datetime.now(timezone.utc).isoformat(),
         }}
     )
 
@@ -3371,7 +3371,7 @@ async def _sync_subscription_from_stripe(subscription_obj: Dict):
     if items and items[0].get('current_period_end'):
         update['current_period_end'] = datetime.fromtimestamp(
             items[0]['current_period_end'], tz=timezone.utc
-        )
+        ).isoformat()
 
     # Set once, the first time this subscription is ever observed active -
     # not overwritten on every sync, so a later past_due/active flap on
@@ -3379,7 +3379,7 @@ async def _sync_subscription_from_stripe(subscription_obj: Dict):
     if subscription_obj.get('status') == 'active':
         existing = await db.users.find_one({'user_id': user_id}, {'_id': 0, 'premium_started_at': 1})
         if not existing or not existing.get('premium_started_at'):
-            update['premium_started_at'] = datetime.now(timezone.utc)
+            update['premium_started_at'] = datetime.now(timezone.utc).isoformat()
 
     await db.users.update_one({'user_id': user_id}, {'$set': update})
 
@@ -3438,7 +3438,7 @@ async def stripe_webhook(request: Request):
                     {'$set': {
                         'payment_status': 'paid',
                         'status': 'completed',
-                        'completed_at': datetime.now(timezone.utc),
+                        'completed_at': datetime.now(timezone.utc).isoformat(),
                     }}
                 )
                 if updated is not None:
