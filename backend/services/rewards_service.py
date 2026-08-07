@@ -71,11 +71,11 @@ async def award_points(db, user_id: str, action: str, amount: Optional[int] = No
         'reference_id': reference_id,
         'description': description or f"Earned {final_points} points for {action.replace('_', ' ')}",
         'type': 'earn',
-        'created_at': datetime.now(timezone.utc).isoformat()
+        'created_at': datetime.now(timezone.utc),
     }
-    
+
     await db.rewards_transactions.insert_one(transaction)
-    
+
     # Update user rewards
     await db.user_rewards.update_one(
         {'user_id': user_id},
@@ -84,7 +84,7 @@ async def award_points(db, user_id: str, action: str, amount: Optional[int] = No
                 'available_points': final_points,
                 'lifetime_points': final_points
             },
-            '$set': {'updated_at': datetime.now(timezone.utc).isoformat()}
+            '$set': {'updated_at': datetime.now(timezone.utc)}
         },
         upsert=True
     )
@@ -110,16 +110,16 @@ async def redeem_points(db, user_id: str, points: int, reference_id: Optional[st
         'reference_id': reference_id,
         'description': description or f"Redeemed {points} points for ${discount_usd:.2f} discount",
         'type': 'redeem',
-        'created_at': datetime.now(timezone.utc).isoformat()
+        'created_at': datetime.now(timezone.utc),
     }
-    
+
     await db.rewards_transactions.insert_one(transaction)
-    
+
     await db.user_rewards.update_one(
         {'user_id': user_id},
         {
             '$inc': {'available_points': -points},
-            '$set': {'updated_at': datetime.now(timezone.utc).isoformat()}
+            '$set': {'updated_at': datetime.now(timezone.utc)}
         }
     )
     
@@ -134,8 +134,8 @@ async def get_or_create_rewards(db, user_id: str) -> dict:
             'user_id': user_id,
             'available_points': 0,
             'lifetime_points': 0,
-            'created_at': datetime.now(timezone.utc).isoformat(),
-            'updated_at': datetime.now(timezone.utc).isoformat()
+            'created_at': datetime.now(timezone.utc),
+            'updated_at': datetime.now(timezone.utc),
         }
         await db.user_rewards.insert_one(dict(rewards))
     return rewards
