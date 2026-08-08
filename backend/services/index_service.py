@@ -46,3 +46,13 @@ async def ensure_indexes(db) -> None:
     await db.bookings.create_index("booking_id")
     await db.bookings.create_index("session_id")
     await db.payment_transactions.create_index("session_id")
+
+    # Tickets (db_models.py's TicketDoc) - each queried independently, not as
+    # a compound pattern: status/kind for dashboard filters ("what needs
+    # triage", "bugs vs features"), updated_at descending for "most
+    # recently active first" sorts, and reporter_user_ids (a multikey index,
+    # since it's an array field) for "tickets this user reported".
+    await db.tickets.create_index("status")
+    await db.tickets.create_index("kind")
+    await db.tickets.create_index([("updated_at", -1)])
+    await db.tickets.create_index("reporter_user_ids")

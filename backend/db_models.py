@@ -41,7 +41,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 # ── users ────────────────────────────────────────────────────────────────
@@ -355,3 +355,61 @@ class SearchCacheDoc(BaseModel):
     results: List[Dict[str, Any]]
     created_at: datetime
     expires_at: datetime
+
+
+# ── tickets (new collection - nothing to migrate) ───────────────────────────
+
+class TicketDoc(BaseModel):
+    """db.tickets - a bug/feature ticket, progressed by an agent-assisted
+    triage/approval workflow: reported -> triaged -> awaiting_approval ->
+    approved -> implemented -> closed, rejected at any gate, or parked in
+    backlog outside that main flow. Brand-new collection as of this model -
+    there is no pre-existing tickets-shaped data anywhere in this app to
+    backfill, so unlike migrations/0001_normalize_timestamps_to_datetime.py's
+    16 collections, every *_at field here is a native datetime from its
+    very first write, with no migration step needed.
+
+    Unlike every other model in this file, tickets has no app-generated
+    string ID field of its own (no "ticket_id") - Mongo's own `_id` is
+    genuinely this document's real identity here, not just an implementation
+    detail every other collection's queries strip via {"_id": 0}. Modeled
+    below as `id` (Python attribute name, since Pydantic v2 treats a
+    leading underscore as a private, non-field attribute) aliased to the
+    wire name "_id", with a before-validator that stringifies a raw
+    bson.ObjectId - every other *_id-shaped field in this file is already a
+    plain str (user_id, trip_id, booking_id, session_id, ...), never a raw
+    ObjectId, so this keeps that same str-everywhere convention for the one
+    field that would otherwise be the sole exception.
+
+    reporter_user_ids/notified_user_ids reference db.users the same way
+    every other collection here does (UserDoc.user_id: str) - never
+    ObjectId. linked_chat_sessions references db.chat_sessions, which (see
+    ChatSessionDoc above) has no app-level ID field of its own either - it's
+    identified only by the compound (user_id, trip_id) key plus its own
+    implicit Mongo _id, so this stores that same stringified _id, for the
+    same reason and via the same conversion as this document's own `id`
+    field above."""
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+    id: Optional[str] = Field(default=None, alias="_id")
+    title: str
+    description: str
+    kind: Literal["bug", "feature"]
+    status: Literal[
+        "reported", "triaged", "awaiting_approval", "approved",
+        "implemented", "closed", "rejected", "backlog",
+    ]
+    reporter_user_ids: List[str] = Field(default_factory=list)
+    linked_chat_sessions: List[str] = Field(default_factory=list)
+    first_reported_at: datetime
+    updated_at: datetime
+    agent_plan: Optional[str] = None
+    agent_diff_summary: Optional[str] = None
+    approval: Literal["pending", "approved", "rejected", "deferred"]
+    approval_note: Optional[str] = None
+    implementation_commit: Optional[str] = None
+    notified_user_ids: List[str] = Field(default_factory=list)
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def _stringify_object_id(cls, v: Any) -> Optional[str]:
+        return str(v) if v is not None else v
