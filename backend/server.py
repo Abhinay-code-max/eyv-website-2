@@ -37,6 +37,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from services import amadeus_service, storage_service, rewards_service, locations_service
 from services import ignav_service as duffel_service  # Ignav replaces Sky Scrapper
 from services import serpapi_hotels_service
+from services import date_utils
 from services import price_cache_service
 from services import log_redaction
 from services import quota_service, usage_service, generation_log_service
@@ -1510,6 +1511,11 @@ async def generate_single_plan(
         preferences.get('children', 0),
         preferences.get('seniors', 0),
     )
+    # Single shared nights computation (services/date_utils.py) - also used
+    # by serpapi_hotels_service.py/amadeus_service.py's hotel-search pricing,
+    # so the itinerary below and hotel pricing can never independently drift
+    # back out of agreement with each other.
+    nights = date_utils.trip_nights(preferences['departure_date'], preferences['return_date'])
 
     # ── Step 1: Fetch real anchor prices (or reuse a previously-fetched one)
     if anchor is None:
@@ -1764,7 +1770,7 @@ CRUISE PREFERENCES (reflect these in the itinerary's activities/highlights text 
 TRIP DETAILS:
 - Destination: {preferences['destination']}
 - From: {preferences['starting_location']}
-- Dates: {preferences['departure_date']} to {preferences['return_date']}
+- Dates: {preferences['departure_date']} to {preferences['return_date']} ({nights} night(s))
 - Travelers: {num_travelers}
 - Tier: {plan_type}
 - Currency: {currency}
@@ -1804,7 +1810,7 @@ OUTPUT: Return ONLY valid JSON, no markdown, no explanation:
   "budget_tips": ["tip 1", "tip 2", "tip 3"]
 }}
 
-Fill in ALL days from {preferences['departure_date']} to {preferences['return_date']}.
+Fill in EXACTLY {nights} itinerary day(s) - one per night of the stay, dated {preferences['departure_date']} through the night before the {preferences['return_date']} return. Do NOT add a separate day for {preferences['return_date']} itself - the traveler checks out and travels home that morning, so it is not its own paid day; fold the return leg's transportation cost into the final day above instead.
 Use EXACT prices from constraints above — especially ₹{anchor_transport_price:,.0f} for {anchor_transport_label} and ₹{hotel_price_per_night:,.0f}/night for hotel.
 Generate realistic activities, meals, and local transport for each day.
 
@@ -1932,6 +1938,19 @@ MEAL AND ACTIVITY PRICING (group size = {num_travelers}):
                             dl['transportation']['details'] = f"Self-drive - {preferences['destination']} to {preferences.get('starting_location','')} (~{road_distance_km:.0f} km)"
                         else:
                             dl['transportation']['details'] = f"Return {flight_airline} {flight_number} - {preferences['destination']} to {preferences.get('starting_location','')}"
+                elif not is_one_way:
+                    # A single-night stay has only one itinerary day (matching
+                    # nights, not nights+1 - see the `nights` computation
+                    # above), and that one day is simultaneously the outbound
+                    # AND the return day. The outbound leg was already priced
+                    # on d1 above (d1 IS this day, since len(days) == 1) - add
+                    # the return leg's cost on top rather than overwrite it,
+                    # so a round trip still ends up priced at the correct
+                    # round-trip total (2x anchor_transport_price) instead of
+                    # silently losing the return leg just because it has
+                    # nowhere else to live. One-way skips this entirely (no
+                    # return leg exists to add).
+                    d1['transportation']['cost'] = anchor_transport_price * 2
 
         if hotel_price_per_night > 0:
             for day_data in itinerary.values():

@@ -9,29 +9,28 @@ Each case is a dict:
   travel_pace/road_*/cruise_*  - fed straight into generate_single_plan's
                                   `preferences` dict (mirrors TripPreferences)
   expected_days       - itinerary day count generate_single_plan should
-                         produce for this date range: (return_date - departure_date).days + 1.
-                         generate_single_plan treats return_date as its own full
-                         itinerary day (accommodation is force-charged on every
-                         day key including the last - server.py's post-processing),
-                         confirmed both by two live-Gemini eval runs (a 3-day gap
-                         consistently produced 4 itinerary days) and by two existing
-                         tests that assert on real date-to-day-count behavior:
-                         tests/test_pricing_recompute_invariant.py and
-                         tests/test_cruise_pricing.py (both use a 1-day gap and
-                         assert day_1 AND day_2 exist, each separately charged a
-                         full night's accommodation).
-                         NOTE: this is NOT the same convention the hotel-search
-                         path uses - services/serpapi_hotels_service.py and
-                         services/amadeus_service.py compute nights as a plain
-                         (check_out - check_in).days, no +1. So a hotel search for
-                         a given date range prices it at N nights, but that same
-                         stay folded into a generated itinerary ends up charged for
-                         N+1 nights (the extra day_N+1 entry's forced accommodation
-                         cost). That mismatch is a real product inconsistency -
-                         flagged separately, not something this eval set's
-                         expected_days should try to paper over by picking a
-                         convention that doesn't match what generate_single_plan
-                         (the function under eval) actually does.
+                         produce for this date range: max((return_date -
+                         departure_date).days, 1) - one itinerary day per night
+                         of the stay, floored at 1 for a same-day/malformed date
+                         pair. This now matches the hotel-search convention
+                         exactly (services/serpapi_hotels_service.py and
+                         services/amadeus_service.py both compute nights as the
+                         same plain (check_out - check_in).days, floored at 1) -
+                         generate_single_plan used to treat return_date as its
+                         own extra full itinerary day (accommodation force-
+                         charged on every day key including that last one),
+                         over-counting by one night versus what a hotel search
+                         for the identical date range would price. Fixed by
+                         having the prompt ask for exactly `nights` days
+                         (server.py's own nights computation, same formula as
+                         above) instead of "ALL days from departure_date to
+                         return_date" inclusive, with the return leg's transport
+                         cost folded into the final night's day entry - see the
+                         "Last day" / single-day-stay comments in
+                         generate_single_plan's post-processing.
+                         See test_generate_single_plan_day_count_matches_hotel_search_nights
+                         in tests/test_pricing_recompute_invariant.py for the
+                         regression guard tying both sides to the same count.
   preference_check    - present only on "preference" cases, see run_eval.py
                          for the check types this drives
 
@@ -84,7 +83,7 @@ def _case(id, destination, starting_location, transportation, plan_type,
         "trip_type": "Family" if adults > 1 else "Solo",
         "currency": "INR",
         "budget_mode": True,
-        "expected_days": (r - d).days + 1,
+        "expected_days": max((r - d).days, 1),
         "preference_check": preference_check,
         **road_or_cruise_fields,
     }

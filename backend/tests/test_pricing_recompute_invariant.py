@@ -124,7 +124,13 @@ def test_server_recompute_overrides_wrong_ai_totals_everywhere(monkeypatch):
 
     preferences = {
         "destination": "Goa", "starting_location": "Mumbai",
-        "departure_date": "2027-05-01", "return_date": "2027-05-02",
+        # 2 nights (May 1 + May 2), matching the fixture's day_1/day_2 dates
+        # below one-for-one under the nights-based day count (see server.py's
+        # `nights` computation in generate_single_plan) - NOT a 1-night gap,
+        # which would collapse to a single itinerary day and fold both
+        # transport legs onto it (see test_one_way_flights.py's single-day
+        # round-trip-doubling tests for that edge case specifically).
+        "departure_date": "2027-05-01", "return_date": "2027-05-03",
         "adults": 1, "children": 0, "seniors": 0, "num_travelers": 1,
         "transportation": "Flight", "currency": "INR",
     }

@@ -11,6 +11,7 @@ import httpx
 import sentry_sdk
 from typing import List, Dict, Optional
 
+from . import date_utils
 from . import ignav_service
 
 logger = logging.getLogger(__name__)
@@ -40,12 +41,11 @@ async def search_hotels(
     await ignav_service._refresh_rates_if_stale()
 
     try:
-        # Calculate number of nights for total price
-        from datetime import date
+        # Shared with generate_single_plan's itinerary pricing (see
+        # services/date_utils.py) so the two can't independently drift back
+        # out of agreement with each other.
         try:
-            check_in_date = date.fromisoformat(check_in)
-            check_out_date = date.fromisoformat(check_out)
-            nights = max((check_out_date - check_in_date).days, 1)
+            nights = date_utils.trip_nights(check_in, check_out)
         except (ValueError, TypeError):
             nights = 3
 

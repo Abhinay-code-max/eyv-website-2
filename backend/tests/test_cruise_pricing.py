@@ -198,7 +198,8 @@ def test_cruise_price_survives_generate_single_plan_post_processing(monkeypatch)
     monkeypatch.setattr(server, "db", _db())
 
     anchor = {
-        "is_train": False, "is_cruise": True,
+        "is_train": False, "is_cruise": True, "is_road": False, "is_one_way": False,
+        "road_price": 0, "road_distance_km": 0, "road_vehicle_count": 1,
         "flight_price": 0, "flight_airline": "", "flight_number": "",
         "flight_dep_time": "", "flight_arr_time": "", "flight_duration": "", "flight_stops": 0,
         "train_price": 0, "train_name": "", "train_number": "", "train_class": "", "train_duration": "",
@@ -219,11 +220,23 @@ def test_cruise_price_survives_generate_single_plan_post_processing(monkeypatch)
         "cost_breakdown": {"transportation": 0, "accommodation": 0, "food": 0, "activities": 0, "miscellaneous": 0},
         "total_cost": 0, "highlights": ["h1"], "budget_tips": ["t1"],
     })
-    monkeypatch.setattr(server, "gemini_client", _FakeGeminiClient(fake_response))
+    # server.gemini_client no longer exists as a plain module attribute since
+    # the lazy-client refactor (_get_gemini_client(), an lru_cache-wrapped
+    # factory) - patch that instead of the stale "server.gemini_client"
+    # pattern (pre-existing breakage, unrelated to this file's own cruise-
+    # pricing fix - see test_one_way_flights.py, which already made this
+    # same correction).
+    fake_client = _FakeGeminiClient(fake_response)
+    monkeypatch.setattr(server, "_get_gemini_client", lambda: fake_client)
 
     preferences = {
         "destination": "Goa", "starting_location": "Mumbai",
-        "departure_date": "2027-04-10", "return_date": "2027-04-11",
+        # 2 nights (Apr 10 + Apr 11), matching the fixture's day_1/day_2 dates
+        # below one-for-one under the nights-based day count (see server.py's
+        # `nights` computation in generate_single_plan) - NOT a 1-night gap,
+        # which would collapse to a single itinerary day and fold both
+        # transport legs onto it instead of splitting them across two days.
+        "departure_date": "2027-04-10", "return_date": "2027-04-12",
         "adults": 1, "children": 0, "seniors": 0, "num_travelers": 1,
         "transportation": "Cruise", "currency": "INR",
     }

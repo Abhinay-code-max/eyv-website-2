@@ -9,6 +9,8 @@ from typing import List, Dict, Optional
 import httpx
 import logging
 
+from . import date_utils
+
 logger = logging.getLogger(__name__)
 
 AMADEUS_CLIENT_ID = os.environ.get('AMADEUS_CLIENT_ID', '')
@@ -144,10 +146,11 @@ def _generate_mock_hotels(destination: str, check_in: str, check_out: str, trave
         stars = random.choice([3, 4, 4, 5])
         rating = round(random.uniform(7.5, 9.5), 1)
         
+        # Shared with generate_single_plan's itinerary pricing (see
+        # services/date_utils.py) so the two can't independently drift back
+        # out of agreement with each other.
         try:
-            nights = (datetime.fromisoformat(check_out) - datetime.fromisoformat(check_in)).days
-            if nights <= 0:
-                nights = 3
+            nights = date_utils.trip_nights(check_in, check_out)
         except (ValueError, TypeError):
             nights = 3
         
