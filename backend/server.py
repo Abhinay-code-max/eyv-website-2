@@ -2567,8 +2567,13 @@ async def create_booking(req: BookingRequest, request: Request):
         # checkout.session.completed / polling-confirmed payment) ever
         # promotes this to "confirmed" - see that function and
         # _process_expired_payment for the rest of the state machine.
+        # payment_status mirrors payment_transactions' own convention
+        # ("pending" until a real payment lands, then "paid") - it used to
+        # be hardcoded "mock_paid" here regardless of whether any payment
+        # had happened, which read as an already-paid booking to anything
+        # that inspected the field directly.
         "status": "pending_payment",
-        "payment_status": "mock_paid",
+        "payment_status": "pending",
         "total_amount": resolved["price"],
         "currency": resolved["currency"],
         "created_at": datetime.now(timezone.utc),
@@ -2709,8 +2714,11 @@ async def book_trip_plan(trip_id: str, plan_type: str, request: Request):
         },
         "line_items": line_items,
         "traveler_details": {},
+        # Same not-yet-paid convention as create_booking above - "pending"
+        # until a real payment lands, never a value that reads as "paid"
+        # before any payment has happened.
         "status": "pending_payment",
-        "payment_status": "mock_paid",
+        "payment_status": "pending",
         "total_amount": total_amount,
         "currency": plan.get('currency', 'INR'),
         "created_at": datetime.now(timezone.utc),
@@ -2745,13 +2753,50 @@ async def get_booking(booking_id: str, request: Request):
 
 @api_router.delete("/bookings/{booking_id}")
 async def cancel_booking(booking_id: str, request: Request):
+    """Cancel a booking via a simple status flip - only valid for a booking
+    that was never actually charged (status "pending_payment" or
+    "payment_failed"). A "confirmed" booking has already been paid via a
+    real Stripe checkout (_process_successful_payment) and there is no
+    Stripe refund call anywhere in this codebase (checked: no
+    stripe.Refund/create_refund usage anywhere) - flipping status to
+    "cancelled" here would silently leave the customer's money gone while
+    the record claims a clean cancellation, so that path is blocked with a
+    clear error instead until a real refund flow exists.
+
+    The status filter lives in the update itself, not a separate
+    read-then-write, so a cancel racing a payment success (or two
+    concurrent cancels) can't both observe "still pending_payment" and let
+    one through that should have been blocked - same atomic-filtered-update
+    shape as the rewards/payment race fixes elsewhere in this file. The
+    follow-up find_one below only runs to build a specific error message
+    for the caller; it never gates the mutation itself."""
     user = await get_current_user(request)
     result = await db.bookings.update_one(
-        {"booking_id": booking_id, "user_id": user.user_id},
+        {
+            "booking_id": booking_id,
+            "user_id": user.user_id,
+            "status": {"$in": ["pending_payment", "payment_failed"]},
+        },
         {"$set": {"status": "cancelled", "cancelled_at": datetime.now(timezone.utc)}}
     )
     if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Booking not found")
+        booking = await db.bookings.find_one(
+            {"booking_id": booking_id, "user_id": user.user_id}, {"_id": 0, "status": 1}
+        )
+        if booking is None:
+            raise HTTPException(status_code=404, detail="Booking not found")
+        if booking["status"] == "confirmed":
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "This booking is already paid and confirmed. Cancelling a paid "
+                    "booking isn't supported yet - contact support for a refund."
+                ),
+            )
+        raise HTTPException(
+            status_code=400,
+            detail=f"Booking cannot be cancelled from its current status ('{booking['status']}').",
+        )
     return {"message": "Booking cancelled successfully"}
 
 

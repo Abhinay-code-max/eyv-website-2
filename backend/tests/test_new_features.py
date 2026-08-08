@@ -136,7 +136,11 @@ def test_booking_lifecycle():
     # "confirmed" by a real successful payment (see
     # _process_successful_payment in server.py).
     assert booking["status"] == "pending_payment"
-    assert booking["payment_status"] == "mock_paid"
+    # Never "paid"/"mock_paid" before any real payment has happened - see
+    # cancel_booking's own docstring in server.py for why this distinction
+    # matters (a booking that reads as already-paid must never be
+    # cancellable via the simple no-refund status-flip path).
+    assert booking["payment_status"] == "pending"
     # Price is resolved server-side from the cached search result, never from the request
     assert booking["total_amount"] == expected_price
     assert booking["currency"] == expected_currency

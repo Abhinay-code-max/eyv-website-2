@@ -147,7 +147,7 @@ const SortBar = ({ sort, setSort, filter, setFilter, options }) => (
    A booking's `status` is the whole story now (pending_payment ->
    confirmed, or -> payment_failed on a declined/abandoned/expired
    checkout - see backend server.py). The raw `payment_status` field
-   (mock_paid/paid) is an internal implementation detail, not something to
+   (pending/paid) is an internal implementation detail, not something to
    surface to the user as its own badge - it duplicates/contradicts
    `status` in exactly the cases that used to confuse users here. */
 const BOOKING_STATUS_DISPLAY = {
