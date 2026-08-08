@@ -42,6 +42,7 @@ from services import log_redaction
 from services import quota_service, usage_service, generation_log_service
 from services import chat_service
 from services import booking_expiry_service
+from services import generation_expiry_service
 from services import index_service
 from services import sentry_service
 from services.request_id_middleware import RequestIDMiddleware, RequestIDLogFilter, request_id_var
@@ -3861,6 +3862,18 @@ async def startup_event():
             minutes=10,
             args=[db],
             id="refund_stale_reserved_points",
+        )
+        # Same missed-cleanup backstop, for trip-plan tiers stuck in
+        # status "generating" after a crash/restart mid-generation rather
+        # than a missed webhook - see generation_expiry_service. Reuses
+        # this same scheduler instance for the same single-process reason
+        # noted above the scheduler's definition.
+        _booking_expiry_scheduler.add_job(
+            generation_expiry_service.expire_stuck_generations,
+            "interval",
+            minutes=10,
+            args=[db],
+            id="expire_stuck_generations",
         )
         _booking_expiry_scheduler.start()
         logger.info("Booking-expiry scheduler started (10-minute interval)")
