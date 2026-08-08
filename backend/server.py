@@ -3024,7 +3024,14 @@ def _ensure_stripe_configured():
 @api_router.post("/payments/checkout")
 async def create_checkout(req: CreateCheckoutRequest, request: Request):
     user = await get_current_user(request)
-    
+
+    # Only ever set >0 in the booking branch below (points redemption isn't
+    # offered on subscription checkouts) - defined here, before the
+    # package_id/booking_id branch, so it's always bound regardless of
+    # which branch runs; referenced later for the refund-on-Stripe-failure
+    # path and for tagging the stored transaction.
+    points_reserved = 0
+
     # Determine amount based on backend logic
     if req.package_id:
         # Premium subscription
@@ -3054,11 +3061,22 @@ async def create_checkout(req: CreateCheckoutRequest, request: Request):
         description = f"Booking {booking['booking_id']}"
         payment_type = 'booking'
         
-        # Apply points discount if requested
+        # Apply points discount if requested. Reserved atomically right here
+        # via rewards_service.reserve_points - not just checked, with the
+        # actual deduction deferred to payment success. Two concurrent
+        # checkouts against the same balance could previously both pass a
+        # check-then-later-deduct race and jointly overspend (both read
+        # "sufficient" before either write landed); the filtered $inc inside
+        # reserve_points either atomically claims the points or fails
+        # cleanly, with no window where both requests observe a stale
+        # balance. If this checkout never completes, the reservation is
+        # given back - either by _process_expired_payment (Stripe's
+        # checkout.session.expired webhook, or the /payments/status poll
+        # detecting expiry) or, if neither ever fires,
+        # rewards_service.refund_stale_reserved_points's periodic sweep
+        # (mirrors services.booking_expiry_service.expire_stale_pending_bookings's
+        # own missed-webhook backstop, same STALE_PENDING_TTL).
         if req.use_points > 0:
-            rewards = await rewards_service.get_or_create_rewards(db, user.user_id)
-            if rewards['available_points'] < req.use_points:
-                raise HTTPException(status_code=400, detail="Insufficient points")
             # POINTS_TO_USD is a USD-denominated canonical point value ("100
             # points = $1") - it must be converted into the booking's own
             # `currency` before being subtracted from `amount`, which is in
@@ -3077,8 +3095,12 @@ async def create_checkout(req: CreateCheckoutRequest, request: Request):
                     status_code=400,
                     detail=f"Points redemption is not supported for currency '{currency}'",
                 )
+            reserved = await rewards_service.reserve_points(db, user.user_id, req.use_points)
+            if not reserved:
+                raise HTTPException(status_code=400, detail="Insufficient points")
+            points_reserved = req.use_points
             amount = max(0.50, amount - discount)  # Minimum charge $0.50
-        
+
         metadata = {
             'user_id': user.user_id,
             'booking_id': req.booking_id,
@@ -3129,7 +3151,16 @@ async def create_checkout(req: CreateCheckoutRequest, request: Request):
         session_kwargs['payment_method_types'] = ['card']
 
     _ensure_stripe_configured()
-    session = await asyncio.to_thread(stripe.checkout.Session.create, **session_kwargs)
+    try:
+        session = await asyncio.to_thread(stripe.checkout.Session.create, **session_kwargs)
+    except Exception:
+        # Points were already reserved above (if any) - a failed Checkout
+        # Session means there's no checkout for that reservation to ever be
+        # confirmed or expired against, so it must be given back here
+        # rather than held indefinitely.
+        if points_reserved:
+            await rewards_service.refund_points(db, user.user_id, points_reserved)
+        raise
 
     # Store transaction
     transaction = {
@@ -3145,6 +3176,8 @@ async def create_checkout(req: CreateCheckoutRequest, request: Request):
         'points_used': req.use_points,
         'created_at': datetime.now(timezone.utc),
     }
+    if points_reserved:
+        transaction['points_reservation_status'] = 'reserved'
     await db.payment_transactions.insert_one(transaction)
     
     return {
@@ -3220,6 +3253,60 @@ async def get_payment_status(session_id: str, request: Request):
     }
 
 
+async def _finalize_or_alert_points_redemption(db, transaction: Dict, user_id: str, points_used: int, booking_id: str) -> None:
+    """Finalize the points reservation made atomically at checkout
+    (create_checkout -> rewards_service.reserve_points). available_points
+    was already decremented there, so this must NOT call
+    redeem_points/re-deduct - that would spend the balance a second time.
+    This only needs to flip the reservation reserved -> finalized (a
+    filtered transition, the same shape as the payment_status race fix in
+    get_payment_status/stripe_webhook - only whichever caller actually
+    flips it proceeds) and record the permanent rewards_transactions audit
+    row.
+
+    If the flip fails (the reservation isn't "reserved" anymore - already
+    refunded by rewards_service.refund_stale_reserved_points's sweep, or by
+    _process_expired_payment on a since-revived Stripe session, either
+    possibly racing this very late success), the Stripe charge still
+    reflects the points discount but the points are no longer held - a
+    real money-losing inconsistency. This used to be a silent
+    `except ValueError: pass  # Already validated at checkout` in
+    _process_successful_payment, which swallowed exactly this case. Now
+    it's logged and sent to Sentry for manual reconciliation instead of
+    disappearing - never silently ignored.
+
+    Takes `db` as an explicit parameter (not the module-level `db` global)
+    so it can be exercised directly in tests against a freshly-constructed
+    Motor client, without going through the full HTTP/Stripe-mocking path
+    - see tests/test_rewards_race.py."""
+    finalized_txn = await db.payment_transactions.find_one_and_update(
+        {'session_id': transaction['session_id'], 'points_reservation_status': 'reserved'},
+        {'$set': {'points_reservation_status': 'finalized'}},
+    )
+    if finalized_txn is None:
+        logger.error(
+            f"Points reservation for booking {booking_id} (user {user_id}, "
+            f"{points_used} points) was not in 'reserved' state at payment "
+            f"success - the Stripe charge already reflects the points discount "
+            f"but the points are no longer held. Needs manual reconciliation."
+        )
+        sentry_sdk.capture_exception(
+            RuntimeError(f"Points reservation lost before payment success for booking {booking_id}"),
+            tags={"area": "rewards_points_finalize"},
+        )
+    else:
+        try:
+            await rewards_service.finalize_reserved_points(
+                db, user_id, points_used, booking_id, f"Discount on booking {booking_id}"
+            )
+        except Exception as e:
+            logger.error(
+                f"Failed to record points-redemption audit row for booking "
+                f"{booking_id} (user {user_id}, {points_used} points): {e}"
+            )
+            sentry_sdk.capture_exception(e, tags={"area": "rewards_points_finalize"})
+
+
 async def _process_successful_payment(transaction: Dict):
     """Process successful payment - subscription or booking."""
     metadata = transaction.get('metadata', {})
@@ -3270,12 +3357,11 @@ async def _process_successful_payment(transaction: Dict):
                 }}
             )
             
-            # Redeem points if used
+            # Finalize the points reservation made atomically at checkout -
+            # see _finalize_or_alert_points_redemption's own docstring for
+            # why this must never be a silent no-op.
             if points_used > 0:
-                try:
-                    await rewards_service.redeem_points(db, user_id, points_used, booking_id, f"Discount on booking {booking_id}")
-                except ValueError:
-                    pass  # Already validated at checkout
+                await _finalize_or_alert_points_redemption(db, transaction, user_id, points_used, booking_id)
             
             # Award points for the booking. A bundle earns points for each
             # bookable type it actually contains (same as booking a flight
@@ -3313,22 +3399,40 @@ async def _process_expired_payment(transaction: Dict):
     No-op for premium/subscription checkouts - Problem 2 (real
     subscriptions) is a separate, later effort, and premium access is only
     ever granted on success, never provisionally, so there's no pending
-    state to roll back here."""
+    state to roll back here.
+
+    Also refunds any points reserved at checkout (create_checkout ->
+    rewards_service.reserve_points) - filtered reserved -> refunded
+    transition on the transaction's own points_reservation_status, the same
+    atomic-transition shape as the payment_status race fix above, so this
+    can never double-refund a reservation
+    rewards_service.refund_stale_reserved_points's periodic sweep already
+    caught (or vice versa) - only whichever caller's update actually flips
+    the status gets to call refund_points."""
     metadata = transaction.get('metadata', {})
     if metadata.get('payment_type') != 'booking':
         return
 
     booking_id = metadata.get('booking_id')
-    if not booking_id:
-        return
+    points_used = int(metadata.get('points_used', 0))
+    user_id = metadata.get('user_id') or transaction.get('user_id')
 
-    await db.bookings.update_one(
-        {'booking_id': booking_id, 'status': 'pending_payment'},
-        {'$set': {
-            'status': 'payment_failed',
-            'payment_failed_at': datetime.now(timezone.utc),
-        }}
-    )
+    if booking_id:
+        await db.bookings.update_one(
+            {'booking_id': booking_id, 'status': 'pending_payment'},
+            {'$set': {
+                'status': 'payment_failed',
+                'payment_failed_at': datetime.now(timezone.utc),
+            }}
+        )
+
+    if points_used > 0:
+        updated = await db.payment_transactions.find_one_and_update(
+            {'session_id': transaction['session_id'], 'points_reservation_status': 'reserved'},
+            {'$set': {'points_reservation_status': 'refunded'}},
+        )
+        if updated is not None:
+            await rewards_service.refund_points(db, user_id, points_used)
 
 
 async def _sync_subscription_from_stripe(subscription_obj: Dict):
@@ -3700,6 +3804,18 @@ async def startup_event():
             minutes=10,
             args=[db],
             id="expire_stale_pending_bookings",
+        )
+        # Same missed-webhook backstop as the job above, for points
+        # reserved at checkout rather than booking status - see
+        # rewards_service.refund_stale_reserved_points. Reuses this same
+        # scheduler instance rather than a second AsyncIOScheduler (same
+        # single-process reasoning noted above the scheduler's definition).
+        _booking_expiry_scheduler.add_job(
+            rewards_service.refund_stale_reserved_points,
+            "interval",
+            minutes=10,
+            args=[db],
+            id="refund_stale_reserved_points",
         )
         _booking_expiry_scheduler.start()
         logger.info("Booking-expiry scheduler started (10-minute interval)")

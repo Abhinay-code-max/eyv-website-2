@@ -8,6 +8,7 @@ from typing import Optional
 from datetime import datetime, timezone
 
 from . import ignav_service
+from . import booking_expiry_service
 
 logger = logging.getLogger(__name__)
 
@@ -93,14 +94,32 @@ async def award_points(db, user_id: str, action: str, amount: Optional[int] = No
 
 
 async def redeem_points(db, user_id: str, points: int, reference_id: Optional[str] = None, description: str = "") -> dict:
-    """Redeem points for a discount."""
-    rewards = await get_or_create_rewards(db, user_id)
-    
-    if rewards['available_points'] < points:
+    """Redeem points for a discount. Atomic filtered $inc, not a read-check-
+    write - the old version read `available_points`, checked it in Python,
+    then wrote the decrement as a separate step, which is a classic TOCTOU:
+    two concurrent redeem calls against the same balance could both read a
+    "sufficient" balance before either write landed, jointly overdrawing the
+    user below zero. The filter (`available_points >= points`) and the
+    decrement now happen in the same Mongo operation - only whichever
+    request's update Mongo actually applies gets to proceed to recording the
+    transaction, the other cleanly sees matched_count == 0 and raises. Same
+    pattern as reserve_points below and the payment-status race fix in
+    server.py's stripe_webhook/get_payment_status (find_one_and_update
+    filtered on current state instead of read-then-write)."""
+    await get_or_create_rewards(db, user_id)
+
+    result = await db.user_rewards.update_one(
+        {'user_id': user_id, 'available_points': {'$gte': points}},
+        {
+            '$inc': {'available_points': -points},
+            '$set': {'updated_at': datetime.now(timezone.utc)}
+        }
+    )
+    if result.matched_count == 0:
         raise ValueError("Insufficient points")
-    
+
     discount_usd = points * POINTS_TO_USD
-    
+
     transaction = {
         'transaction_id': f"tx_redeem_{datetime.now(timezone.utc).timestamp()}",
         'user_id': user_id,
@@ -115,15 +134,137 @@ async def redeem_points(db, user_id: str, points: int, reference_id: Optional[st
 
     await db.rewards_transactions.insert_one(transaction)
 
-    await db.user_rewards.update_one(
-        {'user_id': user_id},
+    return {'points_redeemed': points, 'discount_usd': discount_usd}
+
+
+async def reserve_points(db, user_id: str, points: int) -> bool:
+    """Atomically reserve `points` from a user's available balance for a
+    pending Stripe checkout (server.py's create_checkout) - filtered $inc,
+    same shape as redeem_points above: the sufficiency check and the
+    decrement happen in one Mongo operation, so two concurrent checkouts
+    against the same balance can't both pass a check-then-later-deduct race
+    and jointly overspend. Returns True if the reservation succeeded, False
+    if the user doesn't have enough available_points - callers should treat
+    False as "insufficient points" (e.g. HTTP 400), not raise, since this is
+    the normal/expected outcome of a race loser rather than an error.
+
+    No rewards_transactions row is written here - a reservation is
+    provisional. The permanent audit-trail row is written later by
+    finalize_reserved_points once the payment actually succeeds; if the
+    checkout instead expires or is abandoned, refund_points (or the
+    refund_stale_reserved_points sweep, for missed expiry events) gives the
+    points back with no transaction row ever having existed."""
+    if points <= 0:
+        return True
+    await get_or_create_rewards(db, user_id)
+    result = await db.user_rewards.update_one(
+        {'user_id': user_id, 'available_points': {'$gte': points}},
         {
             '$inc': {'available_points': -points},
             '$set': {'updated_at': datetime.now(timezone.utc)}
         }
     )
-    
-    return {'points_redeemed': points, 'discount_usd': discount_usd}
+    return result.matched_count > 0
+
+
+async def refund_points(db, user_id: str, points: int) -> None:
+    """Inverse of reserve_points - returns previously-reserved points to a
+    user's available balance because the checkout they were reserved for
+    expired or failed before completing. Unconditional $inc (there's no
+    "insufficient balance" failure mode for giving points back) with
+    upsert=True so this is safe to call even in the unlikely case the
+    user_rewards document doesn't exist (reserve_points always creates it
+    first, so this should never actually need to upsert in practice)."""
+    if points <= 0:
+        return
+    await db.user_rewards.update_one(
+        {'user_id': user_id},
+        {
+            '$inc': {'available_points': points},
+            '$set': {'updated_at': datetime.now(timezone.utc)}
+        },
+        upsert=True,
+    )
+
+
+async def finalize_reserved_points(db, user_id: str, points: int, reference_id: Optional[str] = None, description: str = "") -> None:
+    """Record the permanent rewards_transactions audit row for points
+    already decremented by reserve_points at checkout time. Deliberately
+    does NOT touch available_points - the balance was already spent at
+    reservation time, so finalizing again would double-deduct. This is only
+    ever called once server.py's caller has confirmed (via an atomic
+    reserved -> finalized transition on the payment_transactions document)
+    that the reservation is still validly held; it does not re-check the
+    balance itself."""
+    if points <= 0:
+        return
+    discount_usd = points * POINTS_TO_USD
+    transaction = {
+        'transaction_id': f"tx_redeem_{datetime.now(timezone.utc).timestamp()}",
+        'user_id': user_id,
+        'action': 'redeem',
+        'points': -points,
+        'discount_usd': discount_usd,
+        'reference_id': reference_id,
+        'description': description or f"Redeemed {points} points for ${discount_usd:.2f} discount",
+        'type': 'redeem',
+        'created_at': datetime.now(timezone.utc),
+    }
+    await db.rewards_transactions.insert_one(transaction)
+
+
+async def refund_stale_reserved_points(db) -> int:
+    """Refund points reserved at checkout (create_checkout -> reserve_points)
+    whose Stripe Checkout Session was abandoned without Stripe's own
+    checkout.session.expired webhook ever firing and without the user ever
+    polling /payments/status again (e.g. the tab was closed before Checkout
+    even loaded) - the exact same missed-event gap
+    services.booking_expiry_service.expire_stale_pending_bookings backstops
+    for booking status, mirrored here for the points side of the same
+    checkout. Reuses that module's STALE_PENDING_TTL rather than a second,
+    separately-tuned constant, since both are bounded by the same underlying
+    Stripe Checkout Session lifetime.
+
+    Unlike expire_stale_pending_bookings's single update_many (everything it
+    needs to change lives on the one document being matched), refunding
+    here has to $inc a *different* collection's document (user_rewards) for
+    each match, so this walks the stale transactions and, per document,
+    does an atomic find_one_and_update filtered on
+    points_reservation_status == 'reserved' before calling refund_points -
+    the same reserved -> refunded transition server.py's
+    _process_expired_payment uses. That filter is what prevents this sweep
+    from double-refunding a reservation _process_expired_payment (webhook
+    or poll path) already refunded moments earlier, or vice versa - only
+    whichever caller's update actually flips the status gets to call
+    refund_points.
+
+    Returns the number of reservations refunded, for logging/observability."""
+    cutoff = datetime.now(timezone.utc) - booking_expiry_service.STALE_PENDING_TTL
+    stale = await db.payment_transactions.find(
+        {
+            'payment_status': 'pending',
+            'points_reservation_status': 'reserved',
+            'created_at': {'$lt': cutoff},
+        },
+        {'_id': 0, 'session_id': 1, 'user_id': 1, 'points_used': 1},
+    ).to_list(None)
+
+    refunded_count = 0
+    for txn in stale:
+        updated = await db.payment_transactions.find_one_and_update(
+            {'session_id': txn['session_id'], 'points_reservation_status': 'reserved'},
+            {'$set': {'points_reservation_status': 'refunded'}},
+        )
+        if updated is not None:
+            await refund_points(db, txn['user_id'], txn['points_used'])
+            refunded_count += 1
+
+    if refunded_count:
+        logger.info(
+            f"refund_stale_reserved_points: refunded {refunded_count} stale "
+            f"point reservation(s) older than {booking_expiry_service.STALE_PENDING_TTL}"
+        )
+    return refunded_count
 
 
 async def get_or_create_rewards(db, user_id: str) -> dict:
