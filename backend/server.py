@@ -47,6 +47,11 @@ from services import generation_expiry_service
 from services import index_service
 from services import sentry_service
 from services.request_id_middleware import RequestIDMiddleware, RequestIDLogFilter, request_id_var
+# Hard-fails at import time if INTERNAL_TICKET_API_TOKEN is unset (see that
+# module's own docstring) - imported here, unconditionally, so that failure
+# surfaces at server startup, not the first time an agent happens to call
+# /api/internal/tickets/*.
+from internal_tickets_api import router as internal_tickets_router
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -143,6 +148,15 @@ def _sign_wallet_download(item_id: str, expires: int) -> str:
 
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
+
+# internal_tickets_api.py's routes read `request.app.state.tickets_db`
+# rather than closing over a module-level `db` - that module is imported
+# above `db`/`app` even exist (see the import block near the top of this
+# file), so it can't reference either at import time; storing db on
+# app.state here (as soon as both exist) and reading it per-request is what
+# avoids a circular import while still giving those routes the same live
+# Motor client every other route in this file already uses.
+app.state.tickets_db = db
 
 # Captured once at import time (i.e. whenever this worker process actually
 # started running THIS copy of the code) - GET /api/ surfaces both so a
@@ -3901,6 +3915,7 @@ async def startup_event():
 
 
 app.include_router(api_router)
+app.include_router(internal_tickets_router)
 
 app.add_middleware(
     CORSMiddleware,

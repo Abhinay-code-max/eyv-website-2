@@ -54,6 +54,12 @@ jobs:
       # short-lived wallet download URLs) - any value works here, it just
       # needs to be present and stable for the duration of the job.
       WALLET_URL_SIGNING_SECRET: ci-placeholder-wallet-signing-secret-not-a-real-secret
+      # internal_tickets_api.py (imported unconditionally by server.py) also
+      # raises at import time if this is unset - it authenticates every
+      # /api/internal/tickets/* request. Any value works here; the actual
+      # tests that need it (test_internal_tickets_api.py) read it back from
+      # this same env var rather than hardcoding a token value.
+      INTERNAL_TICKET_API_TOKEN: ci-placeholder-internal-ticket-api-token-not-a-real-secret
       # The Gemini client is a lazy singleton (_get_gemini_client in
       # server.py) - not required just to import server.py.
       # backend_test.py's real-Gemini-touching tests (test_chat_stream_authorized,
@@ -187,6 +193,7 @@ jobs:
       DB_NAME: ci_unit_test_database
       CORS_ORIGINS: http://localhost:3000
       WALLET_URL_SIGNING_SECRET: ci-placeholder-wallet-signing-secret-not-a-real-secret
+      INTERNAL_TICKET_API_TOKEN: ci-placeholder-internal-ticket-api-token-not-a-real-secret
       GEMINI_API_KEY: ci-placeholder-unused
     steps:
       - uses: actions/checkout@v4
@@ -242,6 +249,7 @@ jobs:
       DB_NAME: ci_e2e_test_database
       CORS_ORIGINS: http://localhost:3000
       WALLET_URL_SIGNING_SECRET: ci-placeholder-wallet-signing-secret-not-a-real-secret
+      INTERNAL_TICKET_API_TOKEN: ci-placeholder-internal-ticket-api-token-not-a-real-secret
       GEMINI_API_KEY: ci-placeholder-unused
       # Same caveat as backend-tests: without a real Stripe *test-mode*
       # secret, booking-flow.spec.js still passes (it accepts the app's own

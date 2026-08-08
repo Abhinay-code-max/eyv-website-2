@@ -50,8 +50,15 @@ ENV APP_VERSION=${APP_VERSION}
 
 # Only what the app actually imports at runtime - no tests/, tools/,
 # venv/, or .env (secrets come from the platform's env at container start,
-# never baked into the image).
+# never baked into the image). db_models.py and internal_tickets_api.py
+# are both real runtime imports of server.py now (internal_tickets_api.py
+# imports db_models.py in turn, for TicketDoc/TICKET_STATUSES/
+# TICKET_APPROVAL_STATES) - omitting either here would build fine (this
+# Dockerfile is never actually executed during the build) but crash with
+# ModuleNotFoundError the moment the container actually started uvicorn.
 COPY --chown=appuser:appuser server.py .
+COPY --chown=appuser:appuser db_models.py .
+COPY --chown=appuser:appuser internal_tickets_api.py .
 COPY --chown=appuser:appuser services/ ./services/
 
 USER appuser

@@ -359,6 +359,18 @@ class SearchCacheDoc(BaseModel):
 
 # ── tickets (new collection - nothing to migrate) ───────────────────────────
 
+# Exposed as module-level constants (not just inlined in TicketDoc.status/
+# approval below) so internal_tickets_api.py's request-validation models can
+# share the exact same allowed values via Literal[TICKET_STATUSES] /
+# Literal[TICKET_APPROVAL_STATES] - one source of truth for "what's a valid
+# status/approval value", not two lists that have to be kept in sync by hand.
+TICKET_STATUSES = (
+    "reported", "triaged", "awaiting_approval", "approved",
+    "implemented", "closed", "rejected", "backlog",
+)
+TICKET_APPROVAL_STATES = ("pending", "approved", "rejected", "deferred")
+
+
 class TicketDoc(BaseModel):
     """db.tickets - a bug/feature ticket, progressed by an agent-assisted
     triage/approval workflow: reported -> triaged -> awaiting_approval ->
@@ -394,17 +406,14 @@ class TicketDoc(BaseModel):
     title: str
     description: str
     kind: Literal["bug", "feature"]
-    status: Literal[
-        "reported", "triaged", "awaiting_approval", "approved",
-        "implemented", "closed", "rejected", "backlog",
-    ]
+    status: Literal[TICKET_STATUSES]
     reporter_user_ids: List[str] = Field(default_factory=list)
     linked_chat_sessions: List[str] = Field(default_factory=list)
     first_reported_at: datetime
     updated_at: datetime
     agent_plan: Optional[str] = None
     agent_diff_summary: Optional[str] = None
-    approval: Literal["pending", "approved", "rejected", "deferred"]
+    approval: Literal[TICKET_APPROVAL_STATES]
     approval_note: Optional[str] = None
     implementation_commit: Optional[str] = None
     notified_user_ids: List[str] = Field(default_factory=list)
@@ -413,3 +422,25 @@ class TicketDoc(BaseModel):
     @classmethod
     def _stringify_object_id(cls, v: Any) -> Optional[str]:
         return str(v) if v is not None else v
+
+
+class TicketAgentAuditLogDoc(BaseModel):
+    """db.ticket_agent_audit_log - append-only audit trail for every call to
+    /api/internal/tickets/* (see internal_tickets_api.py's
+    _AuditedTicketRoute) - exactly one record per HTTP request through that
+    router, success or failure (auth rejection, validation error, not-found,
+    unexpected exception, or a real success), written from the route-class
+    wrapper rather than per-route so a new route added to that router can't
+    forget to log itself. Like TicketDoc, brand new as of this model, so
+    every field is a native datetime from its first write - no migration.
+
+    No update or delete path exists anywhere in this app for this
+    collection, and none should ever be added - append-only means
+    append-only; a mutable audit log defeats its own purpose."""
+    model_config = ConfigDict(extra="ignore")
+    timestamp: datetime
+    route: str
+    method: str
+    ticket_id: Optional[str] = None
+    status_code: int
+    summary: Dict[str, Any] = Field(default_factory=dict)

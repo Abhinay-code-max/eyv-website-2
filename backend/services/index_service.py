@@ -56,3 +56,9 @@ async def ensure_indexes(db) -> None:
     await db.tickets.create_index("kind")
     await db.tickets.create_index([("updated_at", -1)])
     await db.tickets.create_index("reporter_user_ids")
+
+    # ticket_agent_audit_log (internal_tickets_api.py) - append-only, browsed
+    # two ways: "what happened recently" (timestamp descending) and "what
+    # happened to this specific ticket" (ticket_id).
+    await db.ticket_agent_audit_log.create_index([("timestamp", -1)])
+    await db.ticket_agent_audit_log.create_index("ticket_id")
