@@ -424,6 +424,38 @@ class TicketDoc(BaseModel):
         return str(v) if v is not None else v
 
 
+# ── notifications ────────────────────────────────────────────────────────
+
+# The only three TicketDoc.status values a ticket transition notifies
+# reporters about (services/notification_service.py, Step 4.3) - a subset
+# of TICKET_STATUSES, exposed the same way (module constant, not inlined)
+# so NotificationDoc.status and that service's own signature share one
+# source of truth for "which transitions are notifiable."
+NOTIFIABLE_TICKET_STATUSES = ("implemented", "rejected", "backlog")
+
+
+class NotificationDoc(BaseModel):
+    """db.notifications - one in-app notification per (ticket, reporter)
+    actually delivered by notification_service.notify_ticket_status_change.
+    Brand-new collection as of this model - every *_at field is a native
+    datetime from its first write, no migration needed (same situation as
+    TicketDoc)."""
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+    id: Optional[str] = Field(default=None, alias="_id")
+    user_id: str
+    ticket_id: str
+    status: Literal[NOTIFIABLE_TICKET_STATUSES]
+    title: str
+    body: str
+    read: bool = False
+    created_at: datetime
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def _stringify_object_id(cls, v: Any) -> Optional[str]:
+        return str(v) if v is not None else v
+
+
 class TicketAgentAuditLogDoc(BaseModel):
     """db.ticket_agent_audit_log - append-only audit trail for every call to
     /api/internal/tickets/* (see internal_tickets_api.py's

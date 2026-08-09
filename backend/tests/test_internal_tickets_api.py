@@ -240,6 +240,42 @@ def test_create_ticket_rejects_unknown_field(client):
     assert r.status_code == 422, r.text
 
 
+def test_get_ticket_by_id_returns_the_ticket(client):
+    """GET /{id} - added for services/notification_service.py (Step 4.3),
+    which fans out from just (ticket_id, status) and needs a way to read
+    the ticket's current title/reporter_user_ids/notified_user_ids back."""
+    ticket_id = _seed_ticket(title="Some specific bug")
+    try:
+        r = client.get(f"/api/internal/tickets/{ticket_id}", headers=AUTH_HEADERS)
+        assert r.status_code == 200, r.text
+        assert r.json()["id"] == ticket_id
+        assert r.json()["title"] == "Some specific bug"
+    finally:
+        _cleanup_ticket(ticket_id)
+
+
+def test_get_ticket_by_id_404s_for_nonexistent_ticket(client):
+    fake_id = str(ObjectId())
+    r = client.get(f"/api/internal/tickets/{fake_id}", headers=AUTH_HEADERS)
+    assert r.status_code == 404, r.text
+
+
+def test_get_ticket_by_id_400s_for_malformed_id(client):
+    r = client.get("/api/internal/tickets/not-a-valid-object-id", headers=AUTH_HEADERS)
+    assert r.status_code == 400, r.text
+
+
+def test_queue_route_still_matches_literal_path_not_swallowed_by_get_by_id(client):
+    """Regression guard for the route-registration-order concern
+    get_ticket's own docstring calls out - GET /queue must still resolve
+    to the queue route (which returns {"tickets": [...], ...}), not to
+    GET /{id} with id="queue" (which would 400, since "queue" isn't a
+    valid ObjectId)."""
+    r = client.get("/api/internal/tickets/queue", headers=AUTH_HEADERS)
+    assert r.status_code == 200, r.text
+    assert "tickets" in r.json()
+
+
 def test_patch_ticket_updates_fields_and_records_real_diff(client):
     ticket_id = _seed_ticket()
     try:

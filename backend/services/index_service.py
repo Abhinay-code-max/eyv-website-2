@@ -62,3 +62,10 @@ async def ensure_indexes(db) -> None:
     # happened to this specific ticket" (ticket_id).
     await db.ticket_agent_audit_log.create_index([("timestamp", -1)])
     await db.ticket_agent_audit_log.create_index("ticket_id")
+
+    # notifications (db_models.py's NotificationDoc, services/notification_service.py) -
+    # the frontend's eventual bell/list UI (Step 4.4) queries "this user's
+    # notifications, newest first" and "this user's unread count" - the
+    # compound index serves both (the unread-count query adds a `read`
+    # equality filter on top of the same user_id prefix).
+    await db.notifications.create_index([("user_id", 1), ("created_at", -1)])

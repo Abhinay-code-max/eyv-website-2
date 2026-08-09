@@ -44,8 +44,8 @@ across server.py:
      That collection has no update/delete path anywhere in this app -
      append-only means append-only.
 
-  5. Routes: POST / (create), GET /queue, PATCH /{id}, POST /{id}/notify -
-     see each function's docstring below.
+  5. Routes: POST / (create), GET /queue, GET /{id}, PATCH /{id},
+     POST /{id}/notify - see each function's docstring below.
 """
 import hmac
 import logging
@@ -428,6 +428,30 @@ async def get_ticket_queue(
     tickets = [_serialize_ticket(doc) for doc in raw_docs]
     request.state.audit_summary = {"status_filter": status, "kind_filter": kind, "result_count": len(tickets)}
     return {"tickets": tickets, "status_filter": status}
+
+
+@router.get("/{id}")
+@_limiter.limit(TICKET_API_RATE_LIMIT)
+async def get_ticket(id: str, request: Request) -> Dict[str, Any]:
+    """Single-ticket fetch by id - added for
+    services/notification_service.py (Step 4.3): notify_ticket_status_change
+    is called with just (ticket_id, new_status) (see that module's own
+    docstring for why), so it needs a way to read the ticket's current
+    title/reporter_user_ids/notified_user_ids back before it can fan out -
+    this route is that read, kept HTTP-only rather than letting that
+    service reach into db.tickets directly, same discipline every other
+    ticket read/write in this system already follows.
+
+    Registered AFTER GET /queue above, deliberately - Starlette matches
+    path routes in registration order, and "/queue" must be tried as a
+    literal path before "/{id}" would otherwise swallow it as id="queue"."""
+    db = request.app.state.tickets_db
+    oid = _parse_ticket_object_id(id)
+    doc = await db.tickets.find_one({"_id": oid})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    request.state.audit_summary = {"fetched": True}
+    return _serialize_ticket(doc)
 
 
 # Only the fields an agent progressing a ticket through its lifecycle
