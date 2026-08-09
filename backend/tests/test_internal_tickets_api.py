@@ -173,6 +173,73 @@ def test_module_never_references_user_or_booking_or_payment_collections():
 
 # ═══════════════ Routes: functional coverage ═══════════════
 
+def test_create_ticket_sets_native_datetimes_and_default_workflow_state(client):
+    r = client.post(
+        "/api/internal/tickets",
+        json={
+            "title": "Refund button does nothing",
+            "description": "Clicking Request Refund on a cancelled booking shows no confirmation and nothing happens.",
+            "kind": "bug",
+            "reporter_user_ids": ["user_test_reporter"],
+            "linked_chat_sessions": ["chat_session_abc"],
+        },
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    ticket_id = body["id"]
+    try:
+        assert body["status"] == "reported"
+        assert body["approval"] == "pending"
+        assert body["kind"] == "bug"
+        assert body["reporter_user_ids"] == ["user_test_reporter"]
+        assert body["linked_chat_sessions"] == ["chat_session_abc"]
+
+        # Confirm the raw stored document uses native BSON datetimes, not
+        # ISO strings - same invariant test_ticket_doc.py checks at the
+        # Pydantic-model level, checked here against what actually landed
+        # in Mongo via this HTTP route. db must be constructed AND queried
+        # inside the same coroutine driven by one _run() call - a bare
+        # `_run(_db().tickets.find_one(...))` calls find_one() synchronously
+        # before any loop is running on this stack (Python 3.14 + Windows +
+        # motor), raising "no current event loop".
+        async def _fetch_raw():
+            return await _db().tickets.find_one({"_id": ObjectId(ticket_id)})
+        raw = _run(_fetch_raw())
+        assert isinstance(raw["first_reported_at"], datetime)
+        assert isinstance(raw["updated_at"], datetime)
+        assert raw["first_reported_at"] == raw["updated_at"]
+
+        # Queried by route, not ticket_id - POST /api/internal/tickets has
+        # no {id} path param (the id doesn't exist until the handler
+        # creates it), so _AuditedTicketRoute's request.path_params.get("id")
+        # is always None for this route, same as it is for GET /queue
+        # (see that route's own audit test above, also queried by route=).
+        entries = _recent_audit_entries(route="/api/internal/tickets")
+        assert entries, "expected an audit entry for this ticket's creation"
+        assert entries[0]["summary"] == {"created": True, "kind": "bug"}
+    finally:
+        _cleanup_ticket(ticket_id)
+
+
+def test_create_ticket_rejects_blank_title(client):
+    r = client.post(
+        "/api/internal/tickets",
+        json={"title": "   ", "description": "Something is wrong", "kind": "bug"},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 422, r.text
+
+
+def test_create_ticket_rejects_unknown_field(client):
+    r = client.post(
+        "/api/internal/tickets",
+        json={"title": "T", "description": "D", "kind": "bug", "status": "closed"},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 422, r.text
+
+
 def test_patch_ticket_updates_fields_and_records_real_diff(client):
     ticket_id = _seed_ticket()
     try:

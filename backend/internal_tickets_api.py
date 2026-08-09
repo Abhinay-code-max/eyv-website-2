@@ -44,8 +44,8 @@ across server.py:
      That collection has no update/delete path anywhere in this app -
      append-only means append-only.
 
-  5. Routes: GET /queue, PATCH /{id}, POST /{id}/notify - see each
-     function's docstring below.
+  5. Routes: POST / (create), GET /queue, PATCH /{id}, POST /{id}/notify -
+     see each function's docstring below.
 """
 import hmac
 import logging
@@ -59,7 +59,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import Response
 from fastapi.routing import APIRoute
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -319,6 +319,70 @@ def _serialize_ticket(raw_doc: Dict[str, Any]) -> Dict[str, Any]:
     handles turning the raw bson.ObjectId `_id` into a plain str, and
     mode="json" turns every datetime into an ISO string for the response."""
     return TicketDoc(**raw_doc).model_dump(mode="json")
+
+
+# reporter_user_ids/linked_chat_sessions are the only identity a created
+# ticket carries about who/what reported it - both default to empty rather
+# than required, since a caller (e.g. an internal service acting on a
+# system-detected condition rather than a specific user's report) may not
+# always have one or the other. extra="forbid" for the same reason
+# TicketPatchRequest uses it below: a typo'd field name should 422, not
+# silently no-op.
+class TicketCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str
+    description: str
+    kind: Literal["bug", "feature"]
+    reporter_user_ids: List[str] = Field(default_factory=list)
+    linked_chat_sessions: List[str] = Field(default_factory=list)
+
+    @field_validator("title", "description")
+    @classmethod
+    def _non_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("must not be blank")
+        return v
+
+
+@router.post("")
+@_limiter.limit(TICKET_API_RATE_LIMIT)
+async def create_ticket(body: TicketCreateRequest, request: Request) -> Dict[str, Any]:
+    """Creates a new ticket at the start of the reported -> triaged ->
+    awaiting_approval -> approved -> implemented -> closed workflow
+    (TicketDoc's own docstring) - status="reported", approval="pending".
+    first_reported_at/updated_at are both set here, server-side, to the same
+    `now` - this endpoint never accepts a client-supplied timestamp for
+    either, matching every other *_at field in this app (see db_models.py's
+    module docstring: a native datetime constructed here, never a caller's
+    string).
+
+    Always creates a brand-new document - deduplicating against an existing
+    open ticket for the same issue (rather than filing a duplicate every
+    time a caller reports the same thing) is a deliberately separate,
+    later piece of work that sits in front of this endpoint, not inside it."""
+    db = request.app.state.tickets_db
+    now = datetime.now(timezone.utc)
+    doc = {
+        "title": body.title,
+        "description": body.description,
+        "kind": body.kind,
+        "status": "reported",
+        "reporter_user_ids": body.reporter_user_ids,
+        "linked_chat_sessions": body.linked_chat_sessions,
+        "first_reported_at": now,
+        "updated_at": now,
+        "agent_plan": None,
+        "agent_diff_summary": None,
+        "approval": "pending",
+        "approval_note": None,
+        "implementation_commit": None,
+        "notified_user_ids": [],
+    }
+    result = await db.tickets.insert_one(doc)
+    created = await db.tickets.find_one({"_id": result.inserted_id})
+
+    request.state.audit_summary = {"created": True, "kind": body.kind}
+    return _serialize_ticket(created)
 
 
 # Fixed cap, not a client-configurable page size - this is a low-volume
