@@ -10,13 +10,13 @@ Handles one turn of a user <-> support-agent conversation:
      server.py's GeneratedPlanResponse enforces for trip generation.
   2. question   -> answered directly via the read-only tools below, no
                    ticket ever created.
-     bug/feature -> create_or_append_ticket is called directly. Dedup ("if
-                   an open ticket for this already exists, append to it
-                   instead of filing a new one") is Step 4.2, a separate,
-                   later piece of work that will slot in as a pre-check
-                   ahead of this call without changing this module's
-                   interface - for now every bug/feature report files a new
-                   ticket.
+     bug/feature -> ticket_dedup_service.check_and_resolve_ticket is called
+                   (Step 4.2) - THAT module decides whether this is the same
+                   underlying issue as an existing open ticket (append the
+                   new reporter, no duplicate filed) or genuinely new
+                   (create_or_append_ticket runs, same as before Step 4.2
+                   existed). This module no longer makes that decision
+                   itself - it just hands the candidate report over.
      other       -> stays conversational: no tool calls, no ticket.
   3. Every turn is logged to db.generation_logs - the exact same
      collection/field-shape 3.7's generation_log_service.py already writes
@@ -72,6 +72,8 @@ from google.genai import types as genai_types
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from db_models import GenerationLogDoc, TicketDoc
+
+from . import ticket_dedup_service
 
 logger = logging.getLogger(__name__)
 
@@ -234,11 +236,13 @@ async def create_or_append_ticket(
     reporter_user_id: Optional[str] = None,
     chat_session_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """The only write tool. Always creates a brand-new ticket for now -
-    dedup ("append to an existing open ticket for the same issue instead of
-    filing a new one") is Step 4.2, a pre-check that will slot in ahead of
-    this call without changing this function's interface (see module
-    docstring). Writes via POST /api/internal/tickets
+    """The only write tool. Always creates a brand-new ticket - the "is this
+    a duplicate of an existing open ticket" decision (Step 4.2) happens
+    before this is ever called: handle_support_message calls
+    ticket_dedup_service.check_and_resolve_ticket instead of this function
+    directly, and that service only calls this one itself on a genuine
+    no-match. This function's own interface never changed for that -
+    it still just creates. Writes via POST /api/internal/tickets
     (internal_tickets_api.py) over HTTP, Bearer-token authenticated exactly
     like any external ticket-agent caller - never db.tickets.insert_one
     directly, so this write still goes through that module's auth, audit
@@ -438,7 +442,8 @@ async def handle_support_message(
 
     if category in ("bug", "feature"):
         try:
-            ticket = await create_or_append_ticket(
+            ticket = await ticket_dedup_service.check_and_resolve_ticket(
+                gemini_client,
                 http_client,
                 internal_ticket_api_token=internal_ticket_api_token,
                 title=message[:120],
@@ -448,7 +453,7 @@ async def handle_support_message(
                 chat_session_id=conversation_id,
             )
         except Exception as e:
-            logger.warning(f"create_or_append_ticket failed for conversation {conversation_id}: {e}")
+            logger.warning(f"check_and_resolve_ticket failed for conversation {conversation_id}: {e}")
             escalate_to_human(reason=f"ticket creation failed: {e}")
             await log_support_turn(
                 db, conversation_id=conversation_id, status=f"{category}:escalated",

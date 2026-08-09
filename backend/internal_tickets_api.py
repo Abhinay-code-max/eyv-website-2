@@ -397,29 +397,57 @@ QUEUE_MAX_RESULTS = 200
 @_limiter.limit(TICKET_API_RATE_LIMIT)
 async def get_ticket_queue(
     request: Request,
-    status: Literal[TICKET_STATUSES] = Query(default="reported"),
+    status: List[Literal[TICKET_STATUSES]] = Query(default=["reported"]),
+    kind: Optional[Literal["bug", "feature"]] = Query(default=None),
 ) -> Dict[str, Any]:
-    """List tickets filtered by status, defaulting to "reported" (the
+    """List tickets filtered by status, defaulting to ["reported"] (the
     default triage view - "what's new") rather than requiring the query
-    param explicitly. Sorted by updated_at descending (most recently active
-    first), capped at QUEUE_MAX_RESULTS."""
+    param explicitly. `status` accepts more than one value via a repeated
+    query param (`?status=reported&status=triaged&...`) - added for
+    services/ticket_dedup_service.py (Step 4.2), which needs every "open"
+    ticket (every status except closed/rejected - six of TICKET_STATUSES'
+    eight values) in one call rather than looping this route once per
+    status, which would be both wasteful (up to 6x the requests for what's
+    conceptually one query) and non-atomic (each call would see a
+    slightly different snapshot of the queue, since nothing prevents a
+    write landing between them). A single caller wanting the old
+    single-status behavior just passes one `status` value, same as before.
+
+    `kind` is an optional exact-match filter (also added for the dedup
+    service - it only ever wants candidates of the same kind as the new
+    report), independent of `status`.
+
+    Sorted by updated_at descending (most recently active first), capped at
+    QUEUE_MAX_RESULTS regardless of how many statuses are requested."""
     db = request.app.state.tickets_db
-    cursor = db.tickets.find({"status": status}).sort("updated_at", -1).limit(QUEUE_MAX_RESULTS)
+    query: Dict[str, Any] = {"status": {"$in": status}}
+    if kind is not None:
+        query["kind"] = kind
+    cursor = db.tickets.find(query).sort("updated_at", -1).limit(QUEUE_MAX_RESULTS)
     raw_docs = await cursor.to_list(QUEUE_MAX_RESULTS)
     tickets = [_serialize_ticket(doc) for doc in raw_docs]
-    request.state.audit_summary = {"status_filter": status, "result_count": len(tickets)}
+    request.state.audit_summary = {"status_filter": status, "kind_filter": kind, "result_count": len(tickets)}
     return {"tickets": tickets, "status_filter": status}
 
 
 # Only the fields an agent progressing a ticket through its lifecycle
 # should ever touch via PATCH - deliberately excludes title/description/
-# kind (the reporter's original content, not the agent's to rewrite),
-# reporter_user_ids/linked_chat_sessions (set once at creation, not an
-# agent edit), and notified_user_ids (its own dedicated /notify route
-# below, not a generic field edit). extra="forbid" rejects any other field
-# name outright (422) rather than silently ignoring it the way TicketDoc's
-# own extra="ignore" would - a PATCH with a typo'd or unexpected field name
-# should fail loudly, not silently no-op that field.
+# kind (the reporter's original content, not the agent's to rewrite) and
+# linked_chat_sessions/notified_user_ids (notified_user_ids has its own
+# dedicated /notify route below, not a generic field edit;
+# linked_chat_sessions is set once at creation). extra="forbid" rejects any
+# other field name outright (422) rather than silently ignoring it the way
+# TicketDoc's own extra="ignore" would - a PATCH with a typo'd or
+# unexpected field name should fail loudly, not silently no-op that field.
+#
+# reporter_user_ids IS patchable, unlike the fields above - added for
+# services/ticket_dedup_service.py (Step 4.2): when a new report turns out
+# to be the same underlying issue as an existing open ticket, that service
+# appends the new reporter to the existing ticket instead of filing a
+# duplicate, via this same PATCH route (never db.tickets directly - see
+# that service's own docstring). Full-list replace semantics, same as every
+# other field here (the caller is responsible for computing the merged
+# list - this route doesn't $addToSet/dedupe it server-side).
 class TicketPatchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     status: Optional[Literal[TICKET_STATUSES]] = None
@@ -428,6 +456,7 @@ class TicketPatchRequest(BaseModel):
     approval: Optional[Literal[TICKET_APPROVAL_STATES]] = None
     approval_note: Optional[str] = None
     implementation_commit: Optional[str] = None
+    reporter_user_ids: Optional[List[str]] = None
 
 
 @router.patch("/{id}")

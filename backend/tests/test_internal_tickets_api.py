@@ -263,6 +263,30 @@ def test_patch_ticket_updates_fields_and_records_real_diff(client):
         _cleanup_ticket(ticket_id)
 
 
+def test_patch_updates_reporter_user_ids(client):
+    """reporter_user_ids became patchable in Step 4.2, for
+    ticket_dedup_service.py's dedup-append flow - full-list replace, same
+    as every other patchable field (the caller computes the merged list)."""
+    ticket_id = _seed_ticket(reporter_user_ids=["user_original_reporter"])
+    try:
+        r = client.patch(
+            f"/api/internal/tickets/{ticket_id}",
+            json={"reporter_user_ids": ["user_original_reporter", "user_second_reporter"]},
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["reporter_user_ids"] == ["user_original_reporter", "user_second_reporter"]
+
+        entries = _recent_audit_entries(ticket_id=ticket_id)
+        diff = entries[0]["summary"]["changed_fields"]
+        assert diff["reporter_user_ids"] == {
+            "from": ["user_original_reporter"],
+            "to": ["user_original_reporter", "user_second_reporter"],
+        }
+    finally:
+        _cleanup_ticket(ticket_id)
+
+
 def test_patch_rejects_unknown_field(client):
     ticket_id = _seed_ticket()
     try:
@@ -332,6 +356,49 @@ def test_queue_defaults_to_reported_and_filters_by_status(client):
 def test_queue_rejects_invalid_status_value(client):
     r = client.get("/api/internal/tickets/queue?status=not-a-real-status", headers=AUTH_HEADERS)
     assert r.status_code == 422, r.text
+
+
+def test_queue_accepts_multiple_status_values_via_repeated_param(client):
+    """Added for services/ticket_dedup_service.py (Step 4.2), which needs
+    every open status (reported/triaged/awaiting_approval/approved/
+    implemented/backlog) in one call rather than looping this route once
+    per status - a single `status=` still works (previous tests cover
+    that), this confirms two-or-more repeated `status=` params are ANDed
+    into an $in, not silently dropped to just the last one."""
+    reported_id = _seed_ticket(status="reported")
+    triaged_id = _seed_ticket(status="triaged")
+    closed_id = _seed_ticket(status="closed")
+    try:
+        r = client.get(
+            "/api/internal/tickets/queue?status=reported&status=triaged",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 200, r.text
+        ids = {t["id"] for t in r.json()["tickets"]}
+        assert reported_id in ids
+        assert triaged_id in ids
+        assert closed_id not in ids
+    finally:
+        _cleanup_ticket(reported_id)
+        _cleanup_ticket(triaged_id)
+        _cleanup_ticket(closed_id)
+
+
+def test_queue_filters_by_kind(client):
+    """kind is an independent, optional exact-match filter - also added
+    for ticket_dedup_service.py, which only ever wants candidates of the
+    same kind as the new report."""
+    bug_id = _seed_ticket(status="reported", kind="bug")
+    feature_id = _seed_ticket(status="reported", kind="feature")
+    try:
+        r = client.get("/api/internal/tickets/queue?status=reported&kind=bug", headers=AUTH_HEADERS)
+        assert r.status_code == 200, r.text
+        ids = {t["id"] for t in r.json()["tickets"]}
+        assert bug_id in ids
+        assert feature_id not in ids
+    finally:
+        _cleanup_ticket(bug_id)
+        _cleanup_ticket(feature_id)
 
 
 # ═══════════════ Instant revocation (#6) ═══════════════

@@ -344,6 +344,53 @@ def test_create_or_append_ticket_validates_response_against_ticket_doc():
         _run(_do())
 
 
+# ═══════════════ Step 4.2 wiring: bug/feature goes through dedup ═══════════
+
+def test_bug_report_is_routed_through_ticket_dedup_service_not_created_directly(monkeypatch):
+    """handle_support_message must no longer decide create-vs-append itself
+    for a bug/feature report - it hands the candidate report to
+    ticket_dedup_service.check_and_resolve_ticket and that module makes the
+    call. Confirmed here by replacing check_and_resolve_ticket with a spy:
+    if handle_support_message still called create_or_append_ticket
+    directly instead, this spy would simply never fire and the test would
+    fail on the call-count assertion below."""
+    calls = []
+
+    async def fake_check_and_resolve_ticket(gemini_client, http_client, **kwargs):
+        calls.append(kwargs)
+        return support_agent_service.TicketDoc(
+            id="ticket_from_dedup", title=kwargs["title"], description=kwargs["description"],
+            kind=kwargs["kind"], status="reported",
+            reporter_user_ids=[kwargs["reporter_user_id"]], linked_chat_sessions=[],
+            first_reported_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc),
+            approval="pending", notified_user_ids=[],
+        ).model_dump(mode="json")
+
+    monkeypatch.setattr(
+        support_agent_service.ticket_dedup_service, "check_and_resolve_ticket", fake_check_and_resolve_ticket,
+    )
+
+    fake_gemini = _FakeGeminiClient(_classification_json("bug"))
+    conversation_id = f"conv_dedup_wiring_test_{ObjectId()}"
+    try:
+        async def _do():
+            return await support_agent_service.handle_support_message(
+                _db(), fake_gemini, http_client=None,
+                internal_ticket_api_token="tok", user_id="user_dedup_test",
+                conversation_id=conversation_id,
+                message="The refund button does nothing when I click it.",
+            )
+        result = _run(_do())
+    finally:
+        _cleanup_generation_logs(conversation_id)
+
+    assert len(calls) == 1, "expected exactly one call to check_and_resolve_ticket"
+    assert calls[0]["kind"] == "bug"
+    assert calls[0]["reporter_user_id"] == "user_dedup_test"
+    assert result.ticket["id"] == "ticket_from_dedup"
+    assert result.category == "bug"
+
+
 # ═══════════════ generation_logs redaction ═══════════════
 
 def test_log_support_turn_redacts_email_and_phone_from_stored_message():
