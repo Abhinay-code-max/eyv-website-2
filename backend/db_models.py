@@ -41,7 +41,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 # ── users ────────────────────────────────────────────────────────────────
@@ -476,3 +476,147 @@ class TicketAgentAuditLogDoc(BaseModel):
     ticket_id: Optional[str] = None
     status_code: int
     summary: Dict[str, Any] = Field(default_factory=dict)
+
+
+# ── analytics_events (Step A7 - standalone, no dependency on the ticket/
+# support-agent system above) ───────────────────────────────────────────
+
+# Deliberately generic and open-ended - a new event_type is just a new
+# string written into this same (event_type, user_id, timestamp, metadata)
+# shape, never a new collection/model, so instrumenting a new funnel step
+# later needs no schema migration. Four tracked as of Step A7, each tied to
+# a specific server.py call site (see that file's own comments at each):
+#   - plan_generated: one tier of a trip finished generating with
+#     status "ready" (_generate_and_save_tier / regenerate_trip_plan).
+#   - plan_to_booking: a booking was created referencing a trip_id - a
+#     generated plan converting into a booking (create_booking when
+#     req.trip_id is set, and book_trip_plan, which always has one).
+#   - booking_completed: a booking's payment actually succeeded
+#     (_process_successful_payment, payment_type == "booking").
+#   - booking_abandoned: the one explicit abandonment signal this app
+#     already has - a pending booking's Stripe Checkout session expired
+#     unpaid (_process_expired_payment, payment_type == "booking"), rather
+#     than a user ever clicking anything like "abandon". Used as the
+#     drop-off signal for the plan_to_booking -> booking_completed leg of
+#     the funnel in internal_analytics_api.py; the plan_generated ->
+#     plan_to_booking leg has no equivalent explicit signal, so that leg's
+#     drop-off is instead a time-window definition (see that module).
+ANALYTICS_EVENT_TYPES = (
+    "plan_generated", "plan_to_booking", "booking_completed", "booking_abandoned",
+)
+
+
+class AnalyticsEventDoc(BaseModel):
+    """db.analytics_events - generic append-only event log, deliberately
+    NOT a bespoke collection/model per event type (contrast db.bookings'
+    real discriminated union above, which models two GENUINELY different
+    storage shapes - these events all share one shape; only `metadata`'s
+    contents vary by event_type). Brand-new collection, so every field is a
+    native datetime from its first write - no migration needed, same
+    situation as TicketDoc.
+
+    Like TicketDoc/NotificationDoc, Mongo's own `_id` is this document's
+    real identity (no app-generated event_id) - same id/_id alias +
+    stringify-ObjectId pattern.
+
+    user_id is Optional, unlike almost every other *_user_id field in this
+    file - every event_type tracked as of Step A7 always has one (every
+    call site requires an authenticated user), but the schema stays generic
+    enough for a future event_type that legitimately has none (e.g. an
+    anonymous landing-page view) without another migration.
+
+    metadata is intentionally Dict[str, Any] rather than a typed field set
+    per event_type - e.g. plan_generated carries trip_id/plan_type/
+    plan_index; booking_completed carries booking_id/trip_id/amount/
+    currency - the same kind of deliberately-untyped, varies-by-variant
+    field as TripDoc.preferences/plans (see this module's own docstring)."""
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+    id: Optional[str] = Field(default=None, alias="_id")
+    event_type: Literal[ANALYTICS_EVENT_TYPES]
+    user_id: Optional[str] = None
+    timestamp: datetime
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def _stringify_object_id(cls, v: Any) -> Optional[str]:
+        return str(v) if v is not None else v
+
+
+# ── promotions (Step A7 - data-model only, see module docstring) ───────────
+
+PROMOTION_DISCOUNT_TYPES = ("percent", "fixed")
+
+
+class PromotionDoc(BaseModel):
+    """db.promotions - a discount code and its validity/usage constraints.
+    Data-model only as of Step A7: nothing in checkout/pricing reads or
+    applies this collection yet, and internal_analytics_api.py's read
+    surface built alongside this is read-only, deliberately - see that
+    module's own docstring for why (the eventual analytics agent gets no
+    promotions write access until it has a long track record of trustworthy
+    output). Brand-new collection, so every field is a native datetime from
+    its first write, same as TicketDoc/AnalyticsEventDoc above.
+
+    discount_type/discount_value replace a single ambiguous "discount"
+    field - a bare number can't say whether it means "20% off" or "$20
+    off", and this collection existing correctly (not just existing) is the
+    whole point of this step, per the roadmap's own framing.
+
+    redemption_count is a plain counter, not computed on the fly from a
+    redemptions ledger - no redemption path exists yet to write one; the
+    later work that actually applies a promo at checkout is what would
+    start incrementing it (atomically, under a usage_cap filter - the same
+    find_one_and_update-under-a-filter shape quota_service.py already uses
+    for generation_quota - so it can enforce the cap under concurrent
+    redemptions). That increment path isn't built here, since there's
+    nothing yet to enforce it against; what IS enforced here, at the
+    data-model level, is that a document can never be constructed already
+    over its own cap or with an inverted validity window - see the
+    validators below."""
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+    id: Optional[str] = Field(default=None, alias="_id")
+    code: str
+    discount_type: Literal[PROMOTION_DISCOUNT_TYPES]
+    discount_value: float
+    valid_from: datetime
+    valid_until: datetime
+    usage_cap: Optional[int] = None
+    redemption_count: int = 0
+    created_at: datetime
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def _stringify_object_id(cls, v: Any) -> Optional[str]:
+        return str(v) if v is not None else v
+
+    @field_validator("code")
+    @classmethod
+    def _normalize_code(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("code must not be blank")
+        return v.strip().upper()
+
+    @field_validator("discount_value")
+    @classmethod
+    def _positive_discount(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("discount_value must be positive")
+        return v
+
+    @field_validator("usage_cap")
+    @classmethod
+    def _positive_cap(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and v <= 0:
+            raise ValueError("usage_cap must be positive when set")
+        return v
+
+    @model_validator(mode="after")
+    def _validate_window_and_cap(self) -> "PromotionDoc":
+        if self.valid_until <= self.valid_from:
+            raise ValueError("valid_until must be after valid_from")
+        if self.discount_type == "percent" and not (0 < self.discount_value <= 100):
+            raise ValueError("percent discount_value must be between 0 and 100")
+        if self.usage_cap is not None and self.redemption_count > self.usage_cap:
+            raise ValueError("redemption_count must not exceed usage_cap")
+        return self

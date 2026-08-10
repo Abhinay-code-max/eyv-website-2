@@ -69,3 +69,8 @@ async def ensure_indexes(db) -> None:
     # compound index serves both (the unread-count query adds a `read`
     # equality filter on top of the same user_id prefix).
     await db.notifications.create_index([("user_id", 1), ("created_at", -1)])
+
+    # analytics_agent_audit_log (internal_analytics_api.py, Step A7) - same
+    # append-only, browsed-by-recency shape as ticket_agent_audit_log above,
+    # just for the analytics router's own requests.
+    await db.analytics_agent_audit_log.create_index([("timestamp", -1)])

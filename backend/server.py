@@ -46,12 +46,18 @@ from services import booking_expiry_service
 from services import generation_expiry_service
 from services import index_service
 from services import sentry_service
+from services import analytics_service
 from services.request_id_middleware import RequestIDMiddleware, RequestIDLogFilter, request_id_var
 # Hard-fails at import time if INTERNAL_TICKET_API_TOKEN is unset (see that
 # module's own docstring) - imported here, unconditionally, so that failure
 # surfaces at server startup, not the first time an agent happens to call
 # /api/internal/tickets/*.
 from internal_tickets_api import router as internal_tickets_router
+# Same hard-fail-at-import-time reasoning, for INTERNAL_ANALYTICS_API_TOKEN
+# (Step A7) - see internal_analytics_api.py's own module docstring. Entirely
+# standalone from the ticket router above - no shared code or dependency
+# between the two beyond this same security template.
+from internal_analytics_api import router as internal_analytics_router
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -157,6 +163,8 @@ api_router = APIRouter(prefix="/api")
 # avoids a circular import while still giving those routes the same live
 # Motor client every other route in this file already uses.
 app.state.tickets_db = db
+# Same reasoning as tickets_db above, for internal_analytics_api.py (Step A7).
+app.state.analytics_db = db
 
 # Captured once at import time (i.e. whenever this worker process actually
 # started running THIS copy of the code) - GET /api/ surfaces both so a
@@ -793,6 +801,14 @@ async def _generate_and_save_tier(
         {"trip_id": trip_id, "user_id": user_id},
         {"$set": {f"plans.{plan_index}": plan, "updated_at": datetime.now(timezone.utc)}},
     )
+    # Only a real, usable plan counts as "generated" for the funnel - a
+    # "failed" tier (generate_single_plan's own graceful-degradation path)
+    # never reached anything a user could act on, so it's not a funnel entry.
+    if plan.get("status") == "ready":
+        await analytics_service.record_event(
+            db, "plan_generated", user_id,
+            {"trip_id": trip_id, "plan_type": plan_type, "plan_index": plan_index},
+        )
 
 
 # Trip Planning Routes
@@ -918,6 +934,15 @@ async def regenerate_trip_plan(trip_id: str, plan_type: str, request: Request):
         {"trip_id": trip_id, "user_id": user.user_id},
         {"$set": {f"plans.{plan_index}": regenerated, "updated_at": datetime.now(timezone.utc)}},
     )
+    # Same plan_generated event as _generate_and_save_tier's initial
+    # generation - a regenerated tier is still "a plan generated" for the
+    # funnel, and re-firing it for the same trip_id doesn't double-count
+    # anything downstream (the funnel counts DISTINCT trip_ids per stage).
+    if regenerated.get("status") == "ready":
+        await analytics_service.record_event(
+            db, "plan_generated", user.user_id,
+            {"trip_id": trip_id, "plan_type": plan_type, "plan_index": plan_index, "regenerated": True},
+        )
 
     return {"trip_id": trip_id, "plan_type": plan_type, "plan": regenerated}
 
@@ -2615,6 +2640,15 @@ async def create_booking(req: BookingRequest, request: Request):
 
     await db.bookings.insert_one(booking_doc)
     booking_doc.pop("_id", None)
+    # A plan -> booking conversion only when this booking actually
+    # references a generated trip (req.trip_id set) - a standalone
+    # flight/hotel booked with no trip_id never went through a generated
+    # plan at all, so it isn't a conversion of one.
+    if req.trip_id:
+        await analytics_service.record_event(
+            db, "plan_to_booking", user.user_id,
+            {"trip_id": req.trip_id, "booking_id": booking_id, "booking_type": req.booking_type},
+        )
     return booking_doc
 
 
@@ -2760,6 +2794,12 @@ async def book_trip_plan(trip_id: str, plan_type: str, request: Request):
 
     await db.bookings.insert_one(booking_doc)
     booking_doc.pop("_id", None)
+    # "Book this Plan" always has a trip_id - this IS the plan -> booking
+    # conversion path.
+    await analytics_service.record_event(
+        db, "plan_to_booking", user.user_id,
+        {"trip_id": trip_id, "booking_id": booking_id, "booking_type": "bundle", "plan_type": plan_type},
+    )
     return booking_doc
 
 
@@ -3435,7 +3475,16 @@ async def _process_successful_payment(transaction: Dict):
                     'paid_at': datetime.now(timezone.utc),
                 }}
             )
-            
+            await analytics_service.record_event(
+                db, "booking_completed", user_id,
+                {
+                    "booking_id": booking_id,
+                    "trip_id": booking.get("trip_id"),
+                    "amount": booking.get("total_amount"),
+                    "currency": booking.get("currency"),
+                },
+            )
+
             # Finalize the points reservation made atomically at checkout -
             # see _finalize_or_alert_points_redemption's own docstring for
             # why this must never be a silent no-op.
@@ -3497,13 +3546,22 @@ async def _process_expired_payment(transaction: Dict):
     user_id = metadata.get('user_id') or transaction.get('user_id')
 
     if booking_id:
-        await db.bookings.update_one(
+        result = await db.bookings.update_one(
             {'booking_id': booking_id, 'status': 'pending_payment'},
             {'$set': {
                 'status': 'payment_failed',
                 'payment_failed_at': datetime.now(timezone.utc),
             }}
         )
+        # Only when this call actually made the pending -> payment_failed
+        # transition (not a no-op racing an already-confirmed/already-failed
+        # booking) - the one explicit abandonment signal this app has, used
+        # as the drop-off count for the plan_to_booking -> booking_completed
+        # leg of the funnel (see AnalyticsEventDoc's own docstring).
+        if result.matched_count > 0:
+            await analytics_service.record_event(
+                db, "booking_abandoned", user_id, {"booking_id": booking_id},
+            )
 
     if points_used > 0:
         updated = await db.payment_transactions.find_one_and_update(
@@ -3869,6 +3927,10 @@ async def startup_event():
     except Exception as e:
         logger.warning(f"index_service index setup failed at startup: {e}")
     try:
+        await analytics_service.ensure_indexes(db)
+    except Exception as e:
+        logger.warning(f"analytics_service index setup failed at startup: {e}")
+    try:
         # Warm the FX rate cache eagerly so the first real request doesn't
         # pay the fetch latency - _refresh_rates_if_stale() also runs lazily
         # from every conversion call site, so this is a nice-to-have, not
@@ -3916,6 +3978,7 @@ async def startup_event():
 
 app.include_router(api_router)
 app.include_router(internal_tickets_router)
+app.include_router(internal_analytics_router)
 
 app.add_middleware(
     CORSMiddleware,
