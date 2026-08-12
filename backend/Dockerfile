@@ -50,15 +50,21 @@ ENV APP_VERSION=${APP_VERSION}
 
 # Only what the app actually imports at runtime - no tests/, tools/,
 # venv/, or .env (secrets come from the platform's env at container start,
-# never baked into the image). db_models.py and internal_tickets_api.py
-# are both real runtime imports of server.py now (internal_tickets_api.py
-# imports db_models.py in turn, for TicketDoc/TICKET_STATUSES/
-# TICKET_APPROVAL_STATES) - omitting either here would build fine (this
+# never baked into the image). db_models.py, internal_tickets_api.py, and
+# internal_analytics_api.py are all real runtime imports of server.py now
+# (internal_tickets_api.py/internal_analytics_api.py each import
+# db_models.py in turn) - omitting any of them here would build fine (this
 # Dockerfile is never actually executed during the build) but crash with
 # ModuleNotFoundError the moment the container actually started uvicorn.
+# internal_analytics_api.py was missing from this list until this fix -
+# the docker-build CI job only runs `docker build`, never `docker run`, so
+# a missing COPY here has zero test coverage and fails silently until an
+# actual deploy boots the image and crashes on startup with
+# "ModuleNotFoundError: No module named 'internal_analytics_api'".
 COPY --chown=appuser:appuser server.py .
 COPY --chown=appuser:appuser db_models.py .
 COPY --chown=appuser:appuser internal_tickets_api.py .
+COPY --chown=appuser:appuser internal_analytics_api.py .
 COPY --chown=appuser:appuser services/ ./services/
 
 USER appuser
