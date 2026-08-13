@@ -58,6 +58,11 @@ from internal_tickets_api import router as internal_tickets_router
 # standalone from the ticket router above - no shared code or dependency
 # between the two beyond this same security template.
 from internal_analytics_api import router as internal_analytics_router
+# Same hard-fail-at-import-time reasoning, for JARVIS_QUEUE_API_TOKEN - see
+# internal_jarvis_api.py's own module docstring. Mounted at the bare
+# "/jarvis" prefix (not "/api/internal/jarvis") because eyv_poller (the
+# JARVIS-side poller, not part of this repo) already polls that exact path.
+from internal_jarvis_api import router as internal_jarvis_router
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -165,6 +170,8 @@ api_router = APIRouter(prefix="/api")
 app.state.tickets_db = db
 # Same reasoning as tickets_db above, for internal_analytics_api.py (Step A7).
 app.state.analytics_db = db
+# Same reasoning as tickets_db above, for internal_jarvis_api.py.
+app.state.jarvis_db = db
 
 # Captured once at import time (i.e. whenever this worker process actually
 # started running THIS copy of the code) - GET /api/ surfaces both so a
@@ -3979,6 +3986,7 @@ async def startup_event():
 app.include_router(api_router)
 app.include_router(internal_tickets_router)
 app.include_router(internal_analytics_router)
+app.include_router(internal_jarvis_router)
 
 app.add_middleware(
     CORSMiddleware,

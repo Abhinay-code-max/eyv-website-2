@@ -62,6 +62,10 @@ jobs:
       INTERNAL_TICKET_API_TOKEN: ci-placeholder-internal-ticket-api-token-not-a-real-secret
       # Same reasoning, for internal_analytics_api.py's INTERNAL_ANALYTICS_API_TOKEN (Step A7).
       INTERNAL_ANALYTICS_API_TOKEN: ci-placeholder-internal-analytics-api-token-not-a-real-secret
+      # Same reasoning, for internal_jarvis_api.py's JARVIS_QUEUE_API_TOKEN -
+      # it authenticates every /jarvis/* request and is imported
+      # unconditionally by server.py.
+      JARVIS_QUEUE_API_TOKEN: ci-placeholder-jarvis-queue-api-token-not-a-real-secret
       # The Gemini client is a lazy singleton (_get_gemini_client in
       # server.py) - not required just to import server.py.
       # backend_test.py's real-Gemini-touching tests (test_chat_stream_authorized,
@@ -198,6 +202,10 @@ jobs:
       INTERNAL_TICKET_API_TOKEN: ci-placeholder-internal-ticket-api-token-not-a-real-secret
       # Same reasoning, for internal_analytics_api.py's INTERNAL_ANALYTICS_API_TOKEN (Step A7).
       INTERNAL_ANALYTICS_API_TOKEN: ci-placeholder-internal-analytics-api-token-not-a-real-secret
+      # Same reasoning, for internal_jarvis_api.py's JARVIS_QUEUE_API_TOKEN -
+      # test_internal_jarvis_api.py (added to the pytest list below) reads
+      # it back from this same env var.
+      JARVIS_QUEUE_API_TOKEN: ci-placeholder-jarvis-queue-api-token-not-a-real-secret
       GEMINI_API_KEY: ci-placeholder-unused
     steps:
       - uses: actions/checkout@v4
@@ -220,6 +228,26 @@ jobs:
             tests/test_payment_webhook_race.py \
             -v --junit-xml=pytest-unit-results.xml 2>&1 | tee pytest-unit-output.log
           exit ${PIPESTATUS[0]}
+      # Deliberately its own step/pytest invocation, not appended to the
+      # command above - confirmed locally that test_payment_webhook_race.py
+      # (a direct-asyncio.run() test file) followed by
+      # test_internal_jarvis_api.py (a TestClient-based file) in the SAME
+      # pytest process binds server.py's shared Motor client to the first
+      # file's event loop, then fails every test in the second file with
+      # "RuntimeError: ... attached to a different loop" - the pre-existing
+      # cross-loop test-infra bug (see test_internal_tickets_api.py's own
+      # module docstring for the same hazard). A separate pytest process has
+      # its own fresh event loop, so this file passes cleanly (proven
+      # locally, 15/15) - keeping it in its own step sidesteps the bug
+      # rather than fixing the underlying shared-Motor-client issue, which
+      # is out of scope here.
+      - name: Run internal JARVIS API tests
+        working-directory: backend
+        run: |
+          set +e
+          pytest tests/test_internal_jarvis_api.py \
+            -v --junit-xml=pytest-jarvis-results.xml 2>&1 | tee pytest-jarvis-output.log
+          exit ${PIPESTATUS[0]}
       - name: Upload backend unit test output
         if: always()
         uses: actions/upload-artifact@v4
@@ -228,6 +256,8 @@ jobs:
           path: |
             backend/pytest-unit-output.log
             backend/pytest-unit-results.xml
+            backend/pytest-jarvis-output.log
+            backend/pytest-jarvis-results.xml
           retention-days: 7
           if-no-files-found: ignore
 
@@ -256,6 +286,8 @@ jobs:
       INTERNAL_TICKET_API_TOKEN: ci-placeholder-internal-ticket-api-token-not-a-real-secret
       # Same reasoning, for internal_analytics_api.py's INTERNAL_ANALYTICS_API_TOKEN (Step A7).
       INTERNAL_ANALYTICS_API_TOKEN: ci-placeholder-internal-analytics-api-token-not-a-real-secret
+      # Same reasoning, for internal_jarvis_api.py's JARVIS_QUEUE_API_TOKEN.
+      JARVIS_QUEUE_API_TOKEN: ci-placeholder-jarvis-queue-api-token-not-a-real-secret
       GEMINI_API_KEY: ci-placeholder-unused
       # Same caveat as backend-tests: without a real Stripe *test-mode*
       # secret, booking-flow.spec.js still passes (it accepts the app's own
