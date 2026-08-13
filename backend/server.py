@@ -65,7 +65,7 @@ from internal_analytics_api import router as internal_analytics_router
 from internal_jarvis_api import router as internal_jarvis_router
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
+from rate_limit_keys import get_trusted_client_ip
 
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
@@ -234,10 +234,10 @@ def _session_token_key(request: Request) -> str:
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Bearer "):
             token = auth_header[len("Bearer "):]
-    return token or get_remote_address(request)
+    return token or get_trusted_client_ip(request)
 
 
-limiter = Limiter(key_func=get_remote_address)
+limiter = Limiter(key_func=get_trusted_client_ip)
 
 
 async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded):

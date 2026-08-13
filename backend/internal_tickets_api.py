@@ -61,10 +61,10 @@ from fastapi.responses import Response
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from slowapi import Limiter
-from slowapi.util import get_remote_address
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from db_models import TICKET_APPROVAL_STATES, TICKET_STATUSES, TicketDoc
+from rate_limit_keys import get_bearer_token_key, get_trusted_client_ip
 
 logger = logging.getLogger(__name__)
 
@@ -125,14 +125,16 @@ def _current_internal_ticket_api_token() -> str:
 # RateLimitExceeded exception handler (that handler is registered on the
 # exception class itself, not tied to one Limiter instance).
 #
-# 60/minute, applied identically to all three routes below: generous enough
-# for a legitimate polling agent (checking the queue every few seconds is
+# 60/minute, applied identically to all routes below: generous enough for
+# a legitimate polling agent (checking the queue every few seconds is
 # comfortably under 60/min) while still bounding a runaway/looping local
 # agent well before it could meaningfully hammer production - a script
 # polling every 100ms (600/min) gets cut off at 10% of that rate. Keyed by
-# IP (get_remote_address), same as server.py's default - there's no
-# per-user session concept here, just a single shared service token, so IP
-# is the only meaningful axis to key on.
+# the caller's bearer token (get_bearer_token_key, rate_limit_keys.py) -
+# there's no per-user session concept here, just a single shared service
+# token, so "N/minute for whoever holds this token" is the meaningful axis,
+# not IP (which behind Railway's edge isn't even stable per-request - see
+# rate_limit_keys.py's own docstring).
 #
 # This only ever runs AFTER require_ticket_agent_token has already let a
 # request through, though - it decorates the endpoint functions themselves
@@ -140,9 +142,11 @@ def _current_internal_ticket_api_token() -> str:
 # router-level Depends() (the auth check) BEFORE calling the endpoint at
 # all. A wrong/no-token request never reaches these decorators, so on its
 # own this limit does nothing to bound repeated bad-token attempts - see
-# AUTH_GATE_RATE_LIMIT immediately below for the check that closes that gap.
+# AUTH_GATE_RATE_LIMIT immediately below for the check that closes that gap
+# (which stays IP-keyed - see get_bearer_token_key's own docstring for why
+# keying THAT check on an attacker-supplied token would be unsafe).
 TICKET_API_RATE_LIMIT = "60/minute"
-_limiter = Limiter(key_func=get_remote_address)
+_limiter = Limiter(key_func=get_trusted_client_ip)
 
 # Bounds EVERY request that reaches require_ticket_agent_token, auth success
 # or failure - the fix for the gap above. 120/minute, not 60: this one
@@ -174,7 +178,7 @@ async def _rate_limit_marker(request: Request) -> None:
     different Limiter"). Decorating require_ticket_agent_token directly
     would set that flag the moment auth ran - which is BEFORE the endpoint
     - silently disabling get_ticket_queue/patch_ticket/notify_ticket's own
-    @_limiter.limit(TICKET_API_RATE_LIMIT) checks the instant this one ran
+    @_limiter.limit(TICKET_API_RATE_LIMIT, key_func=get_bearer_token_key) checks the instant this one ran
     first, on every single request. Calling _check_request_limit directly
     (bypassing the decorator's wrapper entirely) performs the same
     check-and-raise-RateLimitExceeded-if-exceeded behavior without ever
@@ -345,7 +349,7 @@ class TicketCreateRequest(BaseModel):
 
 
 @router.post("")
-@_limiter.limit(TICKET_API_RATE_LIMIT)
+@_limiter.limit(TICKET_API_RATE_LIMIT, key_func=get_bearer_token_key)
 async def create_ticket(body: TicketCreateRequest, request: Request) -> Dict[str, Any]:
     """Creates a new ticket at the start of the reported -> triaged ->
     awaiting_approval -> approved -> implemented -> closed workflow
@@ -394,7 +398,7 @@ QUEUE_MAX_RESULTS = 200
 
 
 @router.get("/queue")
-@_limiter.limit(TICKET_API_RATE_LIMIT)
+@_limiter.limit(TICKET_API_RATE_LIMIT, key_func=get_bearer_token_key)
 async def get_ticket_queue(
     request: Request,
     status: List[Literal[TICKET_STATUSES]] = Query(default=["reported"]),
@@ -431,7 +435,7 @@ async def get_ticket_queue(
 
 
 @router.get("/{id}")
-@_limiter.limit(TICKET_API_RATE_LIMIT)
+@_limiter.limit(TICKET_API_RATE_LIMIT, key_func=get_bearer_token_key)
 async def get_ticket(id: str, request: Request) -> Dict[str, Any]:
     """Single-ticket fetch by id - added for
     services/notification_service.py (Step 4.3): notify_ticket_status_change
@@ -484,7 +488,7 @@ class TicketPatchRequest(BaseModel):
 
 
 @router.patch("/{id}")
-@_limiter.limit(TICKET_API_RATE_LIMIT)
+@_limiter.limit(TICKET_API_RATE_LIMIT, key_func=get_bearer_token_key)
 async def patch_ticket(id: str, body: TicketPatchRequest, request: Request) -> Dict[str, Any]:
     """Partial update - only fields actually present in the request body
     are touched (exclude_unset=True), so omitting a field leaves it
@@ -528,7 +532,7 @@ class TicketNotifyRequest(BaseModel):
 
 
 @router.post("/{id}/notify")
-@_limiter.limit(TICKET_API_RATE_LIMIT)
+@_limiter.limit(TICKET_API_RATE_LIMIT, key_func=get_bearer_token_key)
 async def notify_ticket(id: str, body: TicketNotifyRequest, request: Request) -> Dict[str, Any]:
     """Marks the given user_ids as notified on this ticket - just updates
     notified_user_ids on the document ($addToSet so calling this twice with

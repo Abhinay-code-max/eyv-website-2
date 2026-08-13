@@ -61,10 +61,10 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import Response
 from fastapi.routing import APIRoute
 from slowapi import Limiter
-from slowapi.util import get_remote_address
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from db_models import PromotionDoc
+from rate_limit_keys import get_bearer_token_key, get_trusted_client_ip
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +113,10 @@ def _current_internal_analytics_api_token() -> str:
 # agent, still bounded well below a runaway loop" tradeoff applies
 # identically, so there's no reason to pick different numbers.
 ANALYTICS_API_RATE_LIMIT = "60/minute"
-_limiter = Limiter(key_func=get_remote_address)
+# Default key_func (used by AUTH_GATE_RATE_LIMIT below, pre-auth) is
+# IP-based; the two routes below override to token-based - see
+# rate_limit_keys.py for why each limit needs a different one.
+_limiter = Limiter(key_func=get_trusted_client_ip)
 
 AUTH_GATE_RATE_LIMIT = "120/minute"
 
@@ -246,7 +249,7 @@ async def _trip_ids_first_seen_before(db, event_type: str, cutoff: datetime) -> 
 
 
 @router.get("/funnel")
-@_limiter.limit(ANALYTICS_API_RATE_LIMIT)
+@_limiter.limit(ANALYTICS_API_RATE_LIMIT, key_func=get_bearer_token_key)
 async def get_conversion_funnel(request: Request) -> Dict[str, Any]:
     """Conversion funnel: plan_generated -> plan_to_booking -> booking_completed,
     with a drop-off count/definition at each transition:
@@ -323,7 +326,7 @@ PROMOTIONS_MAX_RESULTS = 200
 
 
 @router.get("/promotions")
-@_limiter.limit(ANALYTICS_API_RATE_LIMIT)
+@_limiter.limit(ANALYTICS_API_RATE_LIMIT, key_func=get_bearer_token_key)
 async def get_promotion_stats(request: Request) -> Dict[str, Any]:
     """Promo redemption stats, per code: usage (redemption_count) vs.
     usage_cap. Read-only - see this module's own docstring for why no

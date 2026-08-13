@@ -240,12 +240,15 @@ jobs:
       # its own fresh event loop, so this file passes cleanly (proven
       # locally, 15/15) - keeping it in its own step sidesteps the bug
       # rather than fixing the underlying shared-Motor-client issue, which
-      # is out of scope here.
-      - name: Run internal JARVIS API tests
+      # is out of scope here. test_rate_limit_keys.py joined this step for
+      # the same reason - it shares the `client` TestClient fixture/Limiter
+      # state with test_internal_jarvis_api.py (its one integration test
+      # hits /jarvis/queue).
+      - name: Run internal JARVIS API and rate-limit-key tests
         working-directory: backend
         run: |
           set +e
-          pytest tests/test_internal_jarvis_api.py \
+          pytest tests/test_internal_jarvis_api.py tests/test_rate_limit_keys.py \
             -v --junit-xml=pytest-jarvis-results.xml 2>&1 | tee pytest-jarvis-output.log
           exit ${PIPESTATUS[0]}
       - name: Upload backend unit test output

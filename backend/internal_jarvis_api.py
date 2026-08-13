@@ -147,10 +147,10 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import Response
 from fastapi.routing import APIRoute
 from slowapi import Limiter
-from slowapi.util import get_remote_address
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from db_models import TICKET_STATUSES, TicketDoc
+from rate_limit_keys import get_bearer_token_key, get_trusted_client_ip
 
 logger = logging.getLogger(__name__)
 
@@ -206,7 +206,10 @@ def _current_jarvis_queue_api_token() -> str:
 # there's no reason to pick different numbers, and headroom stays in place
 # if a second /jarvis/* route is added later.
 JARVIS_QUEUE_API_RATE_LIMIT = "60/minute"
-_limiter = Limiter(key_func=get_remote_address)
+# Default key_func (used by AUTH_GATE_RATE_LIMIT below, pre-auth) is IP-based;
+# GET /queue overrides to token-based - see rate_limit_keys.py for why each
+# limit needs a different one.
+_limiter = Limiter(key_func=get_trusted_client_ip)
 
 # Bounds EVERY request that reaches require_jarvis_queue_token, auth success
 # or failure - see internal_tickets_api.py's AUTH_GATE_RATE_LIMIT comment
@@ -331,7 +334,7 @@ JARVIS_QUEUE_MAX_RESULTS = 200
 
 
 @router.get("/queue")
-@_limiter.limit(JARVIS_QUEUE_API_RATE_LIMIT)
+@_limiter.limit(JARVIS_QUEUE_API_RATE_LIMIT, key_func=get_bearer_token_key)
 async def get_jarvis_queue(
     request: Request,
     status: List[Literal[TICKET_STATUSES]] = Query(default=["approved"]),
