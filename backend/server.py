@@ -4003,6 +4003,27 @@ app.add_middleware(
 app.add_middleware(RequestIDMiddleware)
 
 
+# TEMPORARY - added to confirm Railway's actual forwarding-header behavior
+# after production verification found the 60/min rate limit on /jarvis/queue
+# never trips: get_remote_address (the key_func every Limiter in this app
+# uses) reads request.client.host, which behind Railway's edge is the
+# connecting proxy hop, not the real client, and doesn't appear stable
+# across requests. Read-only, no behavior change - logs the raw connecting
+# IP plus whatever forwarding headers Railway actually sets, so the real
+# fix (a header-based key_func) can be written against confirmed behavior
+# instead of guessed. DELETE this whole middleware once that's confirmed.
+@app.middleware("http")
+async def _temp_log_client_ip_debug(request: Request, call_next):
+    logger.info(
+        "TEMP_IP_DEBUG client.host=%r X-Forwarded-For=%r X-Real-IP=%r path=%s",
+        request.client.host if request.client else None,
+        request.headers.get("X-Forwarded-For"),
+        request.headers.get("X-Real-IP"),
+        request.url.path,
+    )
+    return await call_next(request)
+
+
 @app.get("/health")
 async def health_check():
     """Deliberately at bare /health, not /api/health - this is what an
