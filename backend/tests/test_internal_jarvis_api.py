@@ -525,10 +525,18 @@ def test_wrong_token_requests_are_rate_limited_too(client):
         statuses.append(r.status_code)
         if r.status_code == 429:
             break
-    assert 429 in statuses, (
-        f"expected a 429 within 150 wrong-token requests once "
-        f"AUTH_GATE_RATE_LIMIT was exhausted, got status codes: {sorted(set(statuses))}"
-    )
-    assert all(s in (401, 429) for s in statuses), (
-        f"expected only 401 or 429 responses, got: {sorted(set(statuses))}"
-    )
+    try:
+        assert 429 in statuses, (
+            f"expected a 429 within 150 wrong-token requests once "
+            f"AUTH_GATE_RATE_LIMIT was exhausted, got status codes: {sorted(set(statuses))}"
+        )
+        assert all(s in (401, 429) for s in statuses), (
+            f"expected only 401 or 429 responses, got: {sorted(set(statuses))}"
+        )
+    finally:
+        try:
+            from internal_jarvis_api import _limiter
+            _limiter._storage.reset()
+        except Exception:
+            pass
+

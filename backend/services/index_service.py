@@ -96,3 +96,8 @@ async def ensure_indexes(db) -> None:
     await db.jarvis_agent_audit_log.create_index([("timestamp", -1)])
     await db.jarvis_agent_audit_log.create_index("route")
 
+    # marketing_campaigns (marketing_agent_service.py, Task A.4 - Bob)
+    await db.marketing_campaigns.create_index([("status", 1), ("created_at", -1)])
+    await db.marketing_campaigns.create_index("channel")
+
+

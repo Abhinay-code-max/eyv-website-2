@@ -622,7 +622,38 @@ class PromotionDoc(BaseModel):
         return self
 
 
+# ── Marketing & Bob Agent Models (Task A.4) ─────────────────────────────────
+
+MARKETING_CHANNELS = ("buffer", "instagram", "whatsapp", "promo_code", "multi_channel")
+MARKETING_CAMPAIGN_STATUSES = ("draft", "pending_approval", "approved", "published", "failed", "cancelled")
+
+
+class MarketingCampaignDoc(BaseModel):
+    """db.marketing_campaigns - records of marketing campaigns generated or
+    executed by Bob (marketing sub-agent)."""
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+    id: Optional[str] = Field(default=None, alias="_id")
+    title: str
+    channel: Literal[MARKETING_CHANNELS]
+    status: Literal[MARKETING_CAMPAIGN_STATUSES] = "draft"
+    content: Dict[str, Any] = Field(default_factory=dict)
+    target_audience: Optional[str] = None
+    spend_budget: float = 0.0
+    discount_config: Optional[Dict[str, Any]] = None
+    external_post_id: Optional[str] = None
+    error_message: Optional[str] = None
+    created_at: datetime
+    scheduled_for: Optional[datetime] = None
+    published_at: Optional[datetime] = None
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def _stringify_object_id(cls, v: Any) -> Optional[str]:
+        return str(v) if v is not None else v
+
+
 # ── JARVIS Multi-Agent Queue & Coordination Models (Task A.1) ──────────────
+
 
 JARVIS_QUEUE_STATUSES = ("pending", "in_progress", "resolved", "rejected", "failed")
 

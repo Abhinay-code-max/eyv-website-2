@@ -320,6 +320,13 @@ async def post_jarvis_decision(
     result = await db.jarvis_decisions.insert_one(decision_dict)
     decision_dict["_id"] = str(result.inserted_id)
 
+    # Trigger marketing agent execution if this decision specifies a marketing action
+    try:
+        from services.marketing_agent_service import handle_jarvis_marketing_decision
+        await handle_jarvis_marketing_decision(db, decision_dict)
+    except Exception as m_exc:
+        logger.warning(f"Marketing execution hook error: {m_exc}")
+
     request.state.audit_summary = {
         "decision_type": decision_type,
         "queue_item_id": req.queue_item_id,
@@ -330,6 +337,7 @@ async def post_jarvis_decision(
         "queue_item_updated": queue_item_updated,
         "status": "recorded",
     }
+
 
 
 
