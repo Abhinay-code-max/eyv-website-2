@@ -65,6 +65,7 @@ from internal_analytics_api import router as internal_analytics_router
 # "/jarvis" prefix (not "/api/internal/jarvis") because eyv_poller (the
 # JARVIS-side poller, not part of this repo) already polls that exact path.
 from internal_jarvis_api import router as internal_jarvis_router, public_router as internal_jarvis_public_router
+from admin_api import router as admin_router
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from rate_limit_keys import get_trusted_client_ip
@@ -96,7 +97,21 @@ GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
 OAUTH_TICKET_TTL_SECONDS = 300
-ADMIN_API_KEY = os.environ.get('ADMIN_API_KEY')
+
+
+def _resolve_admin_api_key() -> str:
+    """Authenticates the EYV Admin surface. Fails fast at startup if unset."""
+    key = os.environ.get("ADMIN_API_KEY")
+    if not key:
+        raise RuntimeError(
+            "ADMIN_API_KEY must be set - it authenticates the EYV Admin surface. "
+            "Set it in backend/.env for local dev and in Railway's service variables for deploys."
+        )
+    return key
+
+
+ADMIN_API_KEY = _resolve_admin_api_key()
+
 
 
 def _resolve_cors_origins() -> List[str]:
@@ -4147,6 +4162,8 @@ app.include_router(internal_tickets_router)
 app.include_router(internal_analytics_router)
 app.include_router(internal_jarvis_public_router)
 app.include_router(internal_jarvis_router)
+app.include_router(admin_router)
+
 
 app.add_middleware(
     CORSMiddleware,

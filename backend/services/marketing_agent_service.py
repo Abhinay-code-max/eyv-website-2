@@ -217,8 +217,9 @@ async def execute_approved_campaign(
             logger.warning(f"Failed to create promotion code {code}: {promo_exc}")
 
     # Step 2: Channel Dispatch
-    dry_run = bool(content.get("dry_run", False))
-    sandbox_mode = bool(content.get("sandbox_mode", False))
+    dry_run = bool(content.get("dry_run", False)) or (os.environ.get("BUFFER_SANDBOX_MODE") == "true")
+    sandbox_mode = bool(content.get("sandbox_mode", False)) or (os.environ.get("INSTAGRAM_SANDBOX_MODE") == "true")
+
 
     try:
         if channel == "buffer":

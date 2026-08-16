@@ -105,5 +105,12 @@ async def ensure_indexes(db) -> None:
     await db.revenuecat_events.create_index([("event_type", 1), ("created_at", -1)])
     await db.revenuecat_events.create_index("app_user_id")
 
+    # admin_sessions & admin_audit_log (admin_api.py)
+    await db.admin_sessions.create_index("session_token_hash", unique=True)
+    await db.admin_sessions.create_index("expires_at", expireAfterSeconds=0)
+    await db.admin_audit_log.create_index([("timestamp", -1)])
+    await db.admin_audit_log.create_index("admin_identity")
+
+
 
 

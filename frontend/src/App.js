@@ -23,6 +23,8 @@ const RewardsPage      = lazy(() => import('./pages/RewardsPage'));
 const PremiumPage      = lazy(() => import('./pages/PremiumPage'));
 const PaymentSuccessPage = lazy(() => import('./pages/PaymentSuccessPage'));
 const PaymentCancelPage  = lazy(() => import('./pages/PaymentCancelPage'));
+const AdminDashboardPage = lazy(() => import('./pages/AdminDashboardPage'));
+
 
 /* ── Minimal inline fallback shown during chunk download ─────────
    Keeps the screen from going blank between route transitions.
@@ -103,8 +105,10 @@ function AppRouter() {
             element={<ProtectedRoute><PaymentSuccessPage /></ProtectedRoute>}
           />
           <Route path="/payment-cancel" element={<PaymentCancelPage />} />
+          <Route path="/admin" element={<AdminDashboardPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
+
       </Suspense>
     </>
   );

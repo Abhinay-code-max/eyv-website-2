@@ -771,3 +771,40 @@ class JarvisApprovalDoc(BaseModel):
         return str(v) if v is not None else v
 
 
+# ── Admin Dashboard & Session Models ───────────────────────────────────────
+
+class AdminSessionDoc(BaseModel):
+    """db.admin_sessions - short-lived session tokens for Admin UI control."""
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+    id: Optional[str] = Field(default=None, alias="_id")
+    session_token_hash: str  # SHA-256
+    admin_email: Optional[str] = None
+    created_at: datetime
+    expires_at: datetime  # 2 hours TTL
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def _stringify_object_id(cls, v: Any) -> Optional[str]:
+        return str(v) if v is not None else v
+
+
+class AdminAuditLogDoc(BaseModel):
+    """db.admin_audit_log - immutable audit trail for all admin panel operations."""
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+    id: Optional[str] = Field(default=None, alias="_id")
+    timestamp: datetime
+    route: str
+    method: str
+    admin_identity: str
+    client_ip: str
+    status_code: int
+    action: Optional[str] = None
+    details: Dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def _stringify_object_id(cls, v: Any) -> Optional[str]:
+        return str(v) if v is not None else v
+
+
+

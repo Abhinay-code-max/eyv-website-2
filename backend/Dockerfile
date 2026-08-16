@@ -68,7 +68,9 @@ COPY --chown=appuser:appuser rate_limit_keys.py .
 COPY --chown=appuser:appuser internal_tickets_api.py .
 COPY --chown=appuser:appuser internal_analytics_api.py .
 COPY --chown=appuser:appuser internal_jarvis_api.py .
+COPY --chown=appuser:appuser admin_api.py .
 COPY --chown=appuser:appuser services/ ./services/
+
 
 USER appuser
 
