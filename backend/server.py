@@ -3903,16 +3903,20 @@ async def _subscription_status_payload(user_id: str) -> Dict[str, Any]:
 async def revenuecat_webhook(request: Request):
     """Handle RevenueCat subscription lifecycle webhook events (Task A.3 - Sara).
     Authenticated via REVENUECAT_WEBHOOK_AUTH_KEY using constant-time hmac.compare_digest."""
-    auth_header = request.headers.get("Authorization", "")
-    provided_key = auth_header[len("Bearer "):] if auth_header.startswith("Bearer ") else auth_header
-    expected_key = os.environ.get("REVENUECAT_WEBHOOK_AUTH_KEY", "")
+    auth_header = request.headers.get("Authorization", "").strip()
+    if not auth_header:
+        raise HTTPException(status_code=401, detail="Missing RevenueCat webhook authorization header")
+
+    provided_key = auth_header[len("Bearer "):].strip() if auth_header.startswith("Bearer ") else auth_header
+    expected_key = os.environ.get("REVENUECAT_WEBHOOK_AUTH_KEY", "").strip()
 
     if not expected_key:
         logger.error("REVENUECAT_WEBHOOK_AUTH_KEY is not configured")
         raise HTTPException(status_code=500, detail="RevenueCat webhook auth key not configured")
 
     if not hmac.compare_digest(provided_key, expected_key):
-        raise HTTPException(status_code=401, detail="Invalid or missing RevenueCat webhook authorization")
+        raise HTTPException(status_code=401, detail="Invalid RevenueCat webhook authorization")
+
 
     try:
         payload = await request.json()
@@ -4043,8 +4047,15 @@ _booking_expiry_scheduler = AsyncIOScheduler()
 
 @app.on_event("startup")
 async def startup_event():
+    global client, db
+    client = AsyncIOMotorClient(os.environ['MONGO_URL'])
+    db = client[os.environ['DB_NAME']]
+    app.state.tickets_db = db
+    app.state.analytics_db = db
+    app.state.jarvis_db = db
     try:
         storage_service.init_storage()
+
     except Exception as e:
         logger.warning(f"Storage init failed at startup: {e}")
     try:

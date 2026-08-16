@@ -27,8 +27,8 @@ os.environ["INTERNAL_TICKET_API_TOKEN"] = "test-ticket-token"
 os.environ["INTERNAL_ANALYTICS_API_TOKEN"] = "test-analytics-token"
 os.environ["JARVIS_QUEUE_API_TOKEN"] = "test-jarvis-queue-token"
 os.environ["REVENUECAT_WEBHOOK_AUTH_KEY"] = "test-revenuecat-secret-key"
-os.environ["MONGO_URL"] = "mongodb://localhost:27017"
-os.environ["DB_NAME"] = "test_eyv_analytics"
+os.environ["MONGO_URL"] = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
+os.environ["DB_NAME"] = os.environ.get("DB_NAME", "test_database")
 
 from conftest import client  # noqa: E402,F401
 from services.analytics_agent_service import (
@@ -38,7 +38,7 @@ from services.analytics_agent_service import (
 )
 
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
-DB_NAME = os.environ.get("DB_NAME", "test_eyv_analytics")
+DB_NAME = os.environ.get("DB_NAME", "test_database")
 RC_AUTH_HEADERS = {"Authorization": "Bearer test-revenuecat-secret-key"}
 
 
@@ -48,6 +48,18 @@ def _db():
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+@pytest.fixture(autouse=True)
+def clean_revenuecat_test_data():
+    """Wipes test revenuecat and sara queue records before each test."""
+    async def _clean():
+        db = _db()
+        await db.revenuecat_events.delete_many({})
+        await db.jarvis_queue_items.delete_many({"source_agent": "sara"})
+    _run(_clean())
+    yield
+    _run(_clean())
 
 
 # ═══════════════ 1. AST Scope Isolation Test ═══════════════
@@ -77,7 +89,7 @@ def test_analytics_agent_never_references_forbidden_collections():
 def test_revenuecat_webhook_no_token_rejected_401(client):
     r = client.post("/api/webhooks/revenuecat", json={"event": {"id": "1", "type": "TEST"}})
     assert r.status_code == 401
-    assert "Invalid or missing RevenueCat webhook authorization" in r.text
+    assert "RevenueCat webhook authorization" in r.text
 
 
 def test_revenuecat_webhook_wrong_token_rejected_401(client):
@@ -105,12 +117,6 @@ def test_revenuecat_webhook_correct_token_accepted_200(client):
     assert data["status"] == "test_event_recorded"
     assert data["event_id"] == event_id
 
-    # Cleanup
-    async def _clean():
-        db = _db()
-        await db.revenuecat_events.delete_one({"event_id": event_id})
-    _run(_clean())
-
 
 # ═══════════════ 3. Idempotency & Routine Event Tests ═══════════════
 
@@ -136,16 +142,14 @@ def test_revenuecat_webhook_idempotent_on_duplicate_event_id(client):
     assert r2.json()["status"] == "duplicate_ignored"
 
     # Routine renewal should produce ZERO queue items
-    async def _check_and_clean():
+    async def _check():
         db = _db()
         q_count = await db.jarvis_queue_items.count_documents({
             "source_agent": "sara",
             "payload.app_user_id": "user_renew_123",
         })
         assert q_count == 0  # No queue pollution
-
-        await db.revenuecat_events.delete_many({"event_id": event_id})
-    _run(_check_and_clean())
+    _run(_check())
 
 
 # ═══════════════ 4. Deterministic Anomaly Detection Tests ═══════════════
@@ -165,10 +169,11 @@ def test_single_billing_issue_does_not_enqueue_below_threshold(client):
     assert r.status_code == 200
     assert r.json()["anomaly_detected"] is False
 
-    async def _clean():
+    async def _check():
         db = _db()
-        await db.revenuecat_events.delete_one({"event_id": event_id})
-    _run(_clean())
+        q_count = await db.jarvis_queue_items.count_documents({"source_agent": "sara"})
+        assert q_count == 0
+    _run(_check())
 
 
 def test_billing_issue_spike_triggers_priority_1_anomaly(client):
@@ -178,10 +183,8 @@ def test_billing_issue_spike_triggers_priority_1_anomaly(client):
         now = datetime.now(timezone.utc)
 
         # Seed 2 recent billing issues in DB
-        event_ids = []
         for i in range(2):
             eid = f"rc_seed_bill_{i}_{uuid.uuid4().hex[:8]}"
-            event_ids.append(eid)
             await db.revenuecat_events.insert_one({
                 "event_id": eid,
                 "event_type": "BILLING_ISSUE",
@@ -191,7 +194,6 @@ def test_billing_issue_spike_triggers_priority_1_anomaly(client):
 
         # Send the 3rd billing issue via webhook (crosses threshold >= 3)
         third_id = f"rc_third_bill_{uuid.uuid4().hex[:8]}"
-        event_ids.append(third_id)
         payload = {
             "event": {
                 "id": third_id,
@@ -214,10 +216,6 @@ def test_billing_issue_spike_triggers_priority_1_anomaly(client):
         assert q_item["priority"] == 1  # Critical
         assert q_item["item_type"] == "billing_issue_spike"
         assert "billing failure spike" in q_item["payload"]["summary"]
-
-        # Cleanup
-        await db.revenuecat_events.delete_many({"event_id": {"$in": event_ids}})
-        await db.jarvis_queue_items.delete_one({"_id": q_item["_id"]})
 
     _run(_test())
 
@@ -242,17 +240,14 @@ def test_high_value_subscriber_cancellation_triggers_priority_1(client):
     assert data["anomaly_detected"] is True
     assert data["anomaly_type"] == "high_value_cancellation"
 
-    async def _check_and_clean():
+    async def _check():
         db = _db()
         q_item = await db.jarvis_queue_items.find_one({"_id": ObjectId(data["queue_item_id"])})
         assert q_item is not None
         assert q_item["source_agent"] == "sara"
         assert q_item["priority"] == 1
         assert q_item["payload"]["price"] == 99.00
-
-        await db.revenuecat_events.delete_one({"event_id": event_id})
-        await db.jarvis_queue_items.delete_one({"_id": q_item["_id"]})
-    _run(_check_and_clean())
+    _run(_check())
 
 
 def test_system_promotion_capacity_warning():
@@ -282,7 +277,4 @@ def test_system_promotion_capacity_warning():
 
         # Cleanup
         await db.promotions.delete_one({"code": code})
-        if cap_anomalies[0].queue_item_id:
-            await db.jarvis_queue_items.delete_one({"_id": ObjectId(cap_anomalies[0].queue_item_id)})
-
     _run(_test())
