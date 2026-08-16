@@ -33,7 +33,7 @@ class WhatsAppClient:
         self.access_token = access_token or os.environ.get("WHATSAPP_ACCESS_TOKEN")
         self.phone_number_id = phone_number_id or os.environ.get("WHATSAPP_PHONE_NUMBER_ID")
         self.verify_token = verify_token or os.environ.get("WHATSAPP_VERIFY_TOKEN")
-        self.dry_run = dry_run or not bool(self.access_token and self.phone_number_id)
+        self.dry_run = dry_run
         self._client = http_client
 
     async def _get_client(self) -> httpx.AsyncClient:
@@ -62,6 +62,11 @@ class WhatsAppClient:
                 "to": clean_phone,
                 "body": body,
             }
+
+        if not self.access_token or not self.phone_number_id:
+            raise WhatsAppClientError(
+                "WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID must be configured for live WhatsApp dispatch"
+            )
 
         client = await self._get_client()
         payload = {
@@ -114,7 +119,13 @@ class WhatsAppClient:
                 "template": template_name,
             }
 
+        if not self.access_token or not self.phone_number_id:
+            raise WhatsAppClientError(
+                "WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID must be configured for live WhatsApp dispatch"
+            )
+
         client = await self._get_client()
+
         payload: Dict[str, Any] = {
             "messaging_product": "whatsapp",
             "to": clean_phone,

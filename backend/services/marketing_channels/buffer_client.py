@@ -33,7 +33,7 @@ class BufferClient:
         self.default_profile_ids = default_profile_ids or (
             [p.strip() for p in os.environ.get("BUFFER_PROFILE_IDS", "").split(",") if p.strip()]
         )
-        self.dry_run = dry_run or not bool(self.access_token)
+        self.dry_run = dry_run
         self._client = http_client
 
     async def _get_client(self) -> httpx.AsyncClient:
@@ -70,8 +70,12 @@ class BufferClient:
                 "scheduled_at": scheduled_at.isoformat() if scheduled_at else None,
             }
 
+        if not self.access_token:
+            raise BufferClientError("BUFFER_ACCESS_TOKEN is not configured - cannot publish live without credentials")
+
         client = await self._get_client()
         data: Dict[str, Any] = {
+
             "text": text,
             "profile_ids[]": target_profiles,
             "now": "true" if now else "false",

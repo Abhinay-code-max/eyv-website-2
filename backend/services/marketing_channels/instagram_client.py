@@ -34,7 +34,7 @@ class InstagramClient:
     ):
         self.access_token = access_token or os.environ.get("INSTAGRAM_ACCESS_TOKEN")
         self.account_id = account_id or os.environ.get("INSTAGRAM_ACCOUNT_ID")
-        self.sandbox_mode = sandbox_mode or not bool(self.access_token and self.account_id)
+        self.sandbox_mode = sandbox_mode
         self._client = http_client
 
     async def _get_client(self) -> httpx.AsyncClient:
@@ -46,6 +46,9 @@ class InstagramClient:
         """Performs Instagram payload validation rules."""
         if not caption or not caption.strip():
             raise ValueError("Instagram caption must not be blank")
+
+        if not media_url or not media_url.strip():
+            raise ValueError("Instagram post requires a valid media/image URL")
 
         if len(caption) > MAX_CAPTION_LENGTH:
             raise ValueError(f"Instagram caption exceeds {MAX_CAPTION_LENGTH} chars (got {len(caption)})")
@@ -81,7 +84,13 @@ class InstagramClient:
                 "image_url": image_url,
             }
 
+        if not self.access_token or not self.account_id:
+            raise InstagramClientError(
+                "INSTAGRAM_ACCESS_TOKEN and INSTAGRAM_ACCOUNT_ID must be configured for live Instagram publishing"
+            )
+
         client = await self._get_client()
+
 
         # Step 1: Create media container
         container_params = {

@@ -100,6 +100,7 @@ def test_generate_campaign_draft_enqueues_for_jarvis():
         assert camp_doc["title"] == "Goa Monsoon Getaway"
         assert camp_doc["channel"] == "instagram"
         assert camp_doc["status"] == "pending_approval"
+        assert camp_doc["content"]["image_url"] == "https://enjoyyourvacation.in/images/destinations/goa.jpg"
         assert isinstance(camp_doc["created_at"], datetime)
 
         # Verify work item in db.jarvis_queue_items
@@ -107,7 +108,7 @@ def test_generate_campaign_draft_enqueues_for_jarvis():
         assert q_doc is not None
         assert q_doc["source_agent"] == "bob"
         assert q_doc["item_type"] == "marketing_campaign_approval"
-        assert q_doc["priority"] == 5  # Normal discount <= 25%
+        assert q_doc["priority"] == 5  # Normal discount <= 20%
         assert q_doc["status"] == "pending"
 
         # Cleanup
@@ -118,25 +119,26 @@ def test_generate_campaign_draft_enqueues_for_jarvis():
 
 
 def test_high_discount_campaign_enqueued_at_priority_1():
-    """Campaigns with high discount (>25%) get priority 1 for urgent review."""
+    """Campaigns with high discount (>20%) get priority 1 for urgent review."""
     async def _test():
         db = _db()
         result = await generate_campaign_draft(
             db,
-            title="Flash Sale 30% Off",
+            title="Flash Sale 25% Off",
             channel="whatsapp",
             destination="Manali",
-            discount_percent=30.0,
+            discount_percent=25.0,
         )
 
         q_doc = await db.jarvis_queue_items.find_one({"_id": ObjectId(result.queue_item_id)})
-        assert q_doc["priority"] == 1  # Critical/High Priority
+        assert q_doc["priority"] == 1  # Critical/High Priority (> 20%)
 
         # Cleanup
         await db.marketing_campaigns.delete_one({"_id": ObjectId(result.campaign_id)})
         await db.jarvis_queue_items.delete_one({"_id": q_doc["_id"]})
 
     _run(_test())
+
 
 
 # ═══════════════ 3. Campaign Execution Tests ═══════════════
@@ -189,13 +191,14 @@ def test_execute_approved_campaign_creates_promo_and_publishes():
 
 def test_full_bob_to_jarvis_decision_loop(client):
     """End-to-end flow: Bob drafts campaign -> JARVIS polls queue -> JARVIS POSTs decision -> Campaign executes."""
-    # 1. Bob generates draft
+    # 1. Bob generates draft in sandbox mode for test
     draft = _run(generate_campaign_draft(
         _db(),
         title="Jaipur Royal Heritage",
         channel="instagram",
         destination="Jaipur",
         discount_percent=10.0,
+        custom_content={"sandbox_mode": True},
     ))
 
     # 2. JARVIS polls queue
@@ -204,6 +207,7 @@ def test_full_bob_to_jarvis_decision_loop(client):
     items = r_queue.json()["items"]
     bob_items = [it for it in items if it["id"] == draft.queue_item_id]
     assert len(bob_items) == 1
+
 
     # 3. JARVIS reasons and POSTs approval decision to /jarvis/decisions
     decision_payload = {
@@ -239,3 +243,35 @@ def test_full_bob_to_jarvis_decision_loop(client):
         await db.jarvis_decisions.delete_one({"_id": ObjectId(dec_data["decision"]["id"])})
 
     _run(_check())
+
+
+def test_execute_live_without_credentials_fails_cleanly():
+    """Executing in live non-sandbox mode when credentials are unset records status='failed'."""
+    async def _test():
+        db = _db()
+        draft = await generate_campaign_draft(
+            db,
+            title="Non Sandbox Uncredentialed Live Post",
+            channel="instagram",
+            destination="Goa",
+            custom_content={"sandbox_mode": False},
+        )
+
+        exec_res = await execute_approved_campaign(
+            db,
+            campaign_id=draft.campaign_id,
+            instagram_client=InstagramClient(sandbox_mode=False, access_token=None, account_id=None),
+        )
+
+        assert exec_res.status == "failed"
+        assert "INSTAGRAM_ACCESS_TOKEN" in str(exec_res.error)
+
+        camp_doc = await db.marketing_campaigns.find_one({"_id": ObjectId(draft.campaign_id)})
+        assert camp_doc["status"] == "failed"
+        assert "INSTAGRAM_ACCESS_TOKEN" in camp_doc["error_message"]
+
+        await db.marketing_campaigns.delete_one({"_id": camp_doc["_id"]})
+        await db.jarvis_queue_items.delete_one({"_id": ObjectId(draft.queue_item_id)})
+
+    _run(_test())
+

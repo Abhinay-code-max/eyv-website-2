@@ -37,7 +37,26 @@ class CampaignGenerationResult(BaseModel):
     title: str
     channel: str
     status: str
-    content: Dict[str, Any]
+DESTINATION_DEFAULT_IMAGES = {
+    "goa": "https://enjoyyourvacation.in/images/destinations/goa.jpg",
+    "kerala": "https://enjoyyourvacation.in/images/destinations/kerala.jpg",
+    "manali": "https://enjoyyourvacation.in/images/destinations/manali.jpg",
+    "jaipur": "https://enjoyyourvacation.in/images/destinations/jaipur.jpg",
+    "ladakh": "https://enjoyyourvacation.in/images/destinations/ladakh.jpg",
+    "kashmir": "https://enjoyyourvacation.in/images/destinations/kashmir.jpg",
+    "bali": "https://enjoyyourvacation.in/images/destinations/bali.jpg",
+    "dubai": "https://enjoyyourvacation.in/images/destinations/dubai.jpg",
+}
+DEFAULT_HERO_IMAGE = "https://enjoyyourvacation.in/images/og-hero.jpg"
+
+
+def resolve_campaign_image(destination: str, custom_image_url: Optional[str] = None) -> str:
+    """Resolves a valid, high-resolution production image URL for Instagram/social campaigns.
+    Falls back to curated destination assets or default brand hero image."""
+    if custom_image_url and custom_image_url.strip():
+        return custom_image_url.strip()
+    dest_clean = destination.lower().strip()
+    return DESTINATION_DEFAULT_IMAGES.get(dest_clean, DEFAULT_HERO_IMAGE)
 
 
 class CampaignExecutionResult(BaseModel):
@@ -64,10 +83,13 @@ async def generate_campaign_draft(
 ) -> CampaignGenerationResult:
     """Generates a structured marketing campaign draft and enqueues it for JARVIS approval."""
     now = datetime.now(timezone.utc)
-    content: Dict[str, Any] = custom_content or {}
+    content: Dict[str, Any] = custom_content.copy() if custom_content else {}
 
-    if not content:
-        # Default structured content generation
+    # Ensure image_url is always resolved and present for Instagram/social channels
+    resolved_image = resolve_campaign_image(destination, content.get("image_url"))
+    content["image_url"] = resolved_image
+
+    if not content.get("headline"):
         headline = f"Discover {destination.title()} - {theme.replace('_', ' ').title()}"
         promo_code = f"EYV{destination[:3].upper()}{int(discount_percent)}" if discount_percent else None
         caption = (
@@ -78,14 +100,14 @@ async def generate_campaign_draft(
             caption += f"\n\nUse code {promo_code} for {int(discount_percent)}% off your booking!"
         caption += f"\n\n#EYV #Travel{destination.title()} #Explore #VacationGoals"
 
-        content = {
+        content.update({
             "headline": headline,
             "caption": caption,
             "destination": destination,
             "hashtags": [f"#{destination.title()}", "#Travel", "#EYV", "#Vacation"],
             "promo_code": promo_code,
             "discount_percent": discount_percent,
-        }
+        })
 
     discount_config = None
     if discount_percent and discount_percent > 0:
@@ -113,8 +135,8 @@ async def generate_campaign_draft(
     insert_res = await db.marketing_campaigns.insert_one(campaign_doc)
     campaign_id = str(insert_res.inserted_id)
 
-    # Priority determination: Priority 1 if discount > 25% or spend > $100, else normal 5
-    priority = 1 if (discount_percent and discount_percent > 25) else 5
+    # Priority determination: Priority 1 if discount > 20% or spend > $100, else normal 5
+    priority = 1 if (discount_percent and discount_percent > 20.0) else 5
 
     queue_item = await enqueue_jarvis_item(
         db,
@@ -138,6 +160,7 @@ async def generate_campaign_draft(
         campaign_id=campaign_id,
         queue_item_id=queue_item_id,
         title=title,
+
         channel=channel,
         status="pending_approval",
         content=content,
@@ -194,22 +217,25 @@ async def execute_approved_campaign(
             logger.warning(f"Failed to create promotion code {code}: {promo_exc}")
 
     # Step 2: Channel Dispatch
+    dry_run = bool(content.get("dry_run", False))
+    sandbox_mode = bool(content.get("sandbox_mode", False))
+
     try:
         if channel == "buffer":
-            b_client = buffer_client or get_buffer_client()
+            b_client = buffer_client or BufferClient(dry_run=dry_run)
             text = content.get("caption") or content.get("headline") or campaign.get("title")
             res = await b_client.create_update(text=text, draft=False)
             external_post_id = res.get("buffer_id")
 
         elif channel == "instagram":
-            ig_client = instagram_client or get_instagram_client()
+            ig_client = instagram_client or InstagramClient(sandbox_mode=sandbox_mode)
             caption = content.get("caption") or campaign.get("title")
             image_url = content.get("image_url", "https://enjoyyourvacation.in/images/og-hero.jpg")
             res = await ig_client.publish_photo(image_url=image_url, caption=caption)
             external_post_id = res.get("media_id") or res.get("creation_id")
 
         elif channel == "whatsapp":
-            wa_client = whatsapp_client or get_whatsapp_client()
+            wa_client = whatsapp_client or WhatsAppClient(dry_run=dry_run)
             recipient = content.get("recipient_phone") or "15550001234"
             body = content.get("caption") or content.get("headline") or campaign.get("title")
             res = await wa_client.send_text_message(to_phone=recipient, body=body)
@@ -220,10 +246,11 @@ async def execute_approved_campaign(
 
         elif channel == "multi_channel":
             # Post to Buffer and Instagram simultaneously
-            b_client = buffer_client or get_buffer_client()
+            b_client = buffer_client or BufferClient(dry_run=dry_run)
             text = content.get("caption") or campaign.get("title")
             b_res = await b_client.create_update(text=text, draft=False)
             external_post_id = b_res.get("buffer_id")
+
 
         # Mark campaign as published
         await db.marketing_campaigns.update_one(
