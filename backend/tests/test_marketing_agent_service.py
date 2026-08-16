@@ -27,8 +27,8 @@ os.environ["WALLET_URL_SIGNING_SECRET"] = "test-wallet-secret"
 os.environ["INTERNAL_TICKET_API_TOKEN"] = "test-ticket-token"
 os.environ["INTERNAL_ANALYTICS_API_TOKEN"] = "test-analytics-token"
 os.environ["JARVIS_QUEUE_API_TOKEN"] = "test-jarvis-queue-token"
-os.environ["MONGO_URL"] = "mongodb://localhost:27017"
-os.environ["DB_NAME"] = "test_eyv_marketing"
+os.environ["MONGO_URL"] = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
+os.environ["DB_NAME"] = os.environ.get("DB_NAME", "test_database")
 
 from conftest import client  # noqa: E402,F401
 from services.marketing_agent_service import (
@@ -41,8 +41,9 @@ from services.marketing_channels.instagram_client import InstagramClient
 from services.marketing_channels.whatsapp_client import WhatsAppClient
 
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
-DB_NAME = os.environ.get("DB_NAME", "test_eyv_marketing")
+DB_NAME = os.environ.get("DB_NAME", "test_database")
 AUTH_HEADERS = {"Authorization": "Bearer test-jarvis-queue-token"}
+
 
 
 def _db():

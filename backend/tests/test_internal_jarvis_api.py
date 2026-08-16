@@ -504,15 +504,23 @@ def test_full_agent_to_jarvis_loop_end_to_end(client):
 
 def test_rate_limit_enforced_on_queue_route(client):
     statuses = []
-    for _ in range(75):
-        r = client.get("/jarvis/queue", headers=AUTH_HEADERS)
-        statuses.append(r.status_code)
-        if r.status_code == 429:
-            break
-    assert 429 in statuses, (
-        f"expected a 429 within 75 requests once the 60/minute budget was "
-        f"exhausted, got status codes: {sorted(set(statuses))}"
-    )
+    try:
+        for _ in range(75):
+            r = client.get("/jarvis/queue", headers=AUTH_HEADERS)
+            statuses.append(r.status_code)
+            if r.status_code == 429:
+                break
+        assert 429 in statuses, (
+            f"expected a 429 within 75 requests once the 60/minute budget was "
+            f"exhausted, got status codes: {sorted(set(statuses))}"
+        )
+    finally:
+        try:
+            from internal_jarvis_api import _limiter
+            _limiter._storage.reset()
+        except Exception:
+            pass
+
 
 
 def test_wrong_token_requests_are_rate_limited_too(client):

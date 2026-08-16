@@ -7,7 +7,10 @@ Sara is EYV's sub-agent for:
    high-value subscriber churn, promotion over-redemption).
 3. Selective JARVIS queue production: Only pushing work items to db.jarvis_queue_items
    when meaningful anomaly thresholds are crossed (avoids queue spam).
-4. Strict scope isolation: Never modifies users, bookings, or payments collections.
+4. Anomaly Flood Deduplication: Never enqueues duplicate pending/in-progress anomalies.
+5. Sandbox & Test Event Filtering: Rejects false alarms on environment: SANDBOX.
+6. FX Currency Normalization: Normalizes international currencies to USD equivalent.
+7. Strict scope isolation: Never modifies users, bookings, or payments collections.
 """
 from __future__ import annotations
 
@@ -27,8 +30,35 @@ logger = logging.getLogger(__name__)
 BILLING_ISSUE_1H_THRESHOLD = 3
 CANCELLATION_SURGE_24H_THRESHOLD = 5
 CANCELLATION_RATIO_THRESHOLD = 0.40
-HIGH_VALUE_CHURN_AMOUNT = 50.0
+HIGH_VALUE_CHURN_USD_THRESHOLD = 50.0
 PROMO_CAP_WARNING_RATIO = 0.85
+
+# FX rates for normalizing RevenueCat international currencies to USD equivalent
+FX_RATES_TO_USD = {
+    "USD": 1.0,
+    "INR": 0.012,
+    "EUR": 1.08,
+    "GBP": 1.28,
+    "AED": 0.27,
+    "AUD": 0.65,
+    "CAD": 0.73,
+    "SGD": 0.75,
+}
+
+
+def convert_to_usd(price: Optional[float], currency: Optional[str]) -> float:
+    """Normalizes a transaction amount to USD equivalent. Safely guards against nulls."""
+    if price is None:
+        return 0.0
+    try:
+        val = float(price)
+        if val <= 0:
+            return 0.0
+        curr = str(currency or "USD").upper().strip()
+        rate = FX_RATES_TO_USD.get(curr, 1.0)
+        return round(val * rate, 2)
+    except (ValueError, TypeError):
+        return 0.0
 
 
 class AnomalyEvaluationResult(BaseModel):
@@ -38,6 +68,52 @@ class AnomalyEvaluationResult(BaseModel):
     queue_item_id: Optional[str] = None
     summary: Optional[str] = None
     details: Dict[str, Any] = Field(default_factory=dict)
+
+
+async def _enqueue_anomaly_dedup(
+    db,
+    *,
+    item_type: str,
+    priority: int,
+    payload: Dict[str, Any],
+    summary: str,
+    details: Dict[str, Any],
+) -> AnomalyEvaluationResult:
+    """Helper ensuring we never flood JARVIS with duplicate pending/in-progress anomaly items."""
+    existing = await db.jarvis_queue_items.find_one({
+        "source_agent": "sara",
+        "item_type": item_type,
+        "status": {"$in": ["pending", "in_progress"]},
+    })
+    if existing:
+        logger.info(
+            f"Existing pending queue item for {item_type} (id={existing['_id']}) already open. "
+            "Skipping duplicate queue enqueue."
+        )
+        return AnomalyEvaluationResult(
+            anomaly_detected=True,
+            anomaly_type=item_type,
+            priority=priority,
+            queue_item_id=str(existing["_id"]),
+            summary=summary,
+            details=details,
+        )
+
+    q_item = await enqueue_jarvis_item(
+        db,
+        source_agent="sara",
+        item_type=item_type,
+        priority=priority,
+        payload=payload,
+    )
+    return AnomalyEvaluationResult(
+        anomaly_detected=True,
+        anomaly_type=item_type,
+        priority=priority,
+        queue_item_id=q_item.id if q_item else None,
+        summary=summary,
+        details=details,
+    )
 
 
 async def record_revenuecat_event(db, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -60,7 +136,10 @@ async def record_revenuecat_event(db, payload: Dict[str, Any]) -> Dict[str, Any]
         }
 
     event_type = str(raw_event.get("type", "UNKNOWN")).upper()
+    environment = str(raw_event.get("environment", "PRODUCTION")).upper()
     app_user_id = str(raw_event.get("app_user_id") or "unknown_user")
+    
+    # Null and type guard on price
     price = raw_event.get("price_in_purchased_currency")
     if price is not None:
         try:
@@ -79,7 +158,7 @@ async def record_revenuecat_event(db, payload: Dict[str, Any]) -> Dict[str, Any]
         ),
         "price_in_purchased_currency": price,
         "currency": raw_event.get("currency"),
-        "environment": raw_event.get("environment", "PRODUCTION"),
+        "environment": environment,
         "cancel_reason": raw_event.get("cancel_reason"),
         "raw_payload": raw_event,
         "created_at": now,
@@ -90,8 +169,8 @@ async def record_revenuecat_event(db, payload: Dict[str, Any]) -> Dict[str, Any]
     await db.revenuecat_events.insert_one(doc_data)
 
     # Sandbox / test events: Do not trigger alarms or enqueue to JARVIS
-    if event_type == "TEST":
-        logger.info(f"Received RevenueCat TEST webhook event {event_id}")
+    if event_type == "TEST" or environment == "SANDBOX":
+        logger.info(f"Received RevenueCat TEST/SANDBOX webhook event {event_id} (env={environment})")
         return {
             "status": "test_event_recorded",
             "event_id": event_id,
@@ -99,7 +178,17 @@ async def record_revenuecat_event(db, payload: Dict[str, Any]) -> Dict[str, Any]
         }
 
     # Evaluate event against deterministic anomaly rules
-    eval_result = await evaluate_revenuecat_event(db, doc_data)
+    try:
+        eval_result = await evaluate_revenuecat_event(db, doc_data)
+    except Exception as exc:
+        logger.error(f"Error evaluating RevenueCat event {event_id}: {exc}", exc_info=True)
+        return {
+            "status": "recorded",
+            "event_id": event_id,
+            "anomaly_detected": False,
+            "error": str(exc),
+        }
+
     return {
         "status": "recorded",
         "event_id": event_id,
@@ -113,13 +202,16 @@ async def evaluate_revenuecat_event(db, event_doc: Dict[str, Any]) -> AnomalyEva
     """Evaluates a single RevenueCat event for deterministic threshold crossings."""
     now = datetime.now(timezone.utc)
     event_type = event_doc.get("event_type")
-    price = event_doc.get("price_in_purchased_currency") or 0.0
+    price = event_doc.get("price_in_purchased_currency")
+    currency = event_doc.get("currency")
+    price_usd = convert_to_usd(price, currency)
 
     # 1. Billing Issue Spike Check (>= 3 billing issues in last 1 hour)
     if event_type == "BILLING_ISSUE":
         one_hour_ago = now - timedelta(hours=1)
         recent_billing_issues = await db.revenuecat_events.count_documents({
             "event_type": "BILLING_ISSUE",
+            "environment": {"$ne": "SANDBOX"},
             "created_at": {"$gte": one_hour_ago},
         })
 
@@ -129,9 +221,8 @@ async def evaluate_revenuecat_event(db, event_doc: Dict[str, Any]) -> AnomalyEva
                 f"(threshold={BILLING_ISSUE_1H_THRESHOLD})"
             )
             logger.warning(summary)
-            q_item = await enqueue_jarvis_item(
+            return await _enqueue_anomaly_dedup(
                 db,
-                source_agent="sara",
                 item_type="billing_issue_spike",
                 priority=1,  # Critical emergency
                 payload={
@@ -142,46 +233,34 @@ async def evaluate_revenuecat_event(db, event_doc: Dict[str, Any]) -> AnomalyEva
                     "latest_user_id": event_doc.get("app_user_id"),
                     "timestamp": now.isoformat(),
                 },
-            )
-            return AnomalyEvaluationResult(
-                anomaly_detected=True,
-                anomaly_type="billing_issue_spike",
-                priority=1,
-                queue_item_id=q_item.id if q_item else None,
                 summary=summary,
                 details={"count": recent_billing_issues},
             )
 
-    # 2. High-Value Subscriber Churn Check ($50+ cancellation)
-    if event_type == "CANCELLATION" and price >= HIGH_VALUE_CHURN_AMOUNT:
+    # 2. High-Value Subscriber Churn Check ($50+ USD equivalent cancellation)
+    if event_type == "CANCELLATION" and price_usd >= HIGH_VALUE_CHURN_USD_THRESHOLD:
         summary = (
             f"High-value subscriber cancelled: {event_doc.get('app_user_id')} "
-            f"(${price:.2f} {event_doc.get('currency', 'USD')})"
+            f"(${price_usd:.2f} USD eqv, original: {price} {currency})"
         )
         logger.warning(summary)
-        q_item = await enqueue_jarvis_item(
+        return await _enqueue_anomaly_dedup(
             db,
-            source_agent="sara",
             item_type="high_value_cancellation",
             priority=1,  # Critical
             payload={
                 "metric": "high_value_churn",
                 "app_user_id": event_doc.get("app_user_id"),
                 "price": price,
-                "currency": event_doc.get("currency"),
+                "price_usd": price_usd,
+                "currency": currency,
                 "cancel_reason": event_doc.get("cancel_reason"),
                 "product_id": event_doc.get("product_id"),
                 "summary": summary,
                 "timestamp": now.isoformat(),
             },
-        )
-        return AnomalyEvaluationResult(
-            anomaly_detected=True,
-            anomaly_type="high_value_cancellation",
-            priority=1,
-            queue_item_id=q_item.id if q_item else None,
             summary=summary,
-            details={"price": price},
+            details={"price_usd": price_usd},
         )
 
     # 3. Cancellation Surge Check (>= 5 cancellations in 24h & cancellation ratio > 40%)
@@ -189,10 +268,12 @@ async def evaluate_revenuecat_event(db, event_doc: Dict[str, Any]) -> AnomalyEva
         twenty_four_hours_ago = now - timedelta(hours=24)
         cancellations_24h = await db.revenuecat_events.count_documents({
             "event_type": "CANCELLATION",
+            "environment": {"$ne": "SANDBOX"},
             "created_at": {"$gte": twenty_four_hours_ago},
         })
         renewals_24h = await db.revenuecat_events.count_documents({
             "event_type": "RENEWAL",
+            "environment": {"$ne": "SANDBOX"},
             "created_at": {"$gte": twenty_four_hours_ago},
         })
 
@@ -205,9 +286,8 @@ async def evaluate_revenuecat_event(db, event_doc: Dict[str, Any]) -> AnomalyEva
                 f"({ratio:.1%} churn ratio, threshold={CANCELLATION_RATIO_THRESHOLD:.0%})"
             )
             logger.warning(summary)
-            q_item = await enqueue_jarvis_item(
+            return await _enqueue_anomaly_dedup(
                 db,
-                source_agent="sara",
                 item_type="cancellation_surge",
                 priority=1,
                 payload={
@@ -218,12 +298,6 @@ async def evaluate_revenuecat_event(db, event_doc: Dict[str, Any]) -> AnomalyEva
                     "summary": summary,
                     "timestamp": now.isoformat(),
                 },
-            )
-            return AnomalyEvaluationResult(
-                anomaly_detected=True,
-                anomaly_type="cancellation_surge",
-                priority=1,
-                queue_item_id=q_item.id if q_item else None,
                 summary=summary,
                 details={"cancellations": cancellations_24h, "ratio": ratio},
             )
@@ -247,9 +321,8 @@ async def evaluate_system_anomalies(db) -> List[AnomalyEvaluationResult]:
             if ratio >= PROMO_CAP_WARNING_RATIO:
                 code = promo.get("code")
                 summary = f"Promotion code {code} is at {ratio:.1%} capacity ({redemptions}/{usage_cap} redeemed)"
-                q_item = await enqueue_jarvis_item(
+                res = await _enqueue_anomaly_dedup(
                     db,
-                    source_agent="sara",
                     item_type="promo_capacity_near_limit",
                     priority=5,
                     payload={
@@ -260,14 +333,9 @@ async def evaluate_system_anomalies(db) -> List[AnomalyEvaluationResult]:
                         "summary": summary,
                         "timestamp": now.isoformat(),
                     },
-                )
-                results.append(AnomalyEvaluationResult(
-                    anomaly_detected=True,
-                    anomaly_type="promo_capacity_near_limit",
-                    priority=5,
-                    queue_item_id=q_item.id if q_item else None,
                     summary=summary,
                     details={"code": code, "ratio": ratio},
-                ))
+                )
+                results.append(res)
 
     return results

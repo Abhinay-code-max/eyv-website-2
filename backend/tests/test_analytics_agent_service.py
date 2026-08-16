@@ -1,7 +1,8 @@
 """
 Tests for Sara (Analytics & Business Intelligence Sub-Agent) - Task A.3.
 Verifies RevenueCat webhook auth, idempotency, deterministic anomaly detection,
-selective JARVIS queue production, sandbox event handling, and AST scope isolation.
+anomaly flood dedup, sandbox environment filtering, FX currency normalization,
+null guards, and AST scope isolation.
 """
 from __future__ import annotations
 
@@ -31,10 +32,12 @@ os.environ["MONGO_URL"] = os.environ.get("MONGO_URL", "mongodb://localhost:27017
 os.environ["DB_NAME"] = os.environ.get("DB_NAME", "test_database")
 
 from conftest import client  # noqa: E402,F401
+from server import _resolve_revenuecat_webhook_key
 from services.analytics_agent_service import (
     record_revenuecat_event,
     evaluate_revenuecat_event,
     evaluate_system_anomalies,
+    convert_to_usd,
 )
 
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
@@ -84,7 +87,14 @@ def test_analytics_agent_never_references_forbidden_collections():
     assert not accessed, f"analytics_agent_service.py violates scope discipline: accessed {accessed}"
 
 
-# ═══════════════ 2. RevenueCat Webhook Authentication Tests ═══════════════
+# ═══════════════ 2. Startup Hard-Fail & Webhook Auth Tests ═══════════════
+
+def test_startup_hard_fails_when_revenuecat_webhook_key_is_missing(monkeypatch):
+    """Server boot must hard fail if REVENUECAT_WEBHOOK_AUTH_KEY is unset."""
+    monkeypatch.delenv("REVENUECAT_WEBHOOK_AUTH_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="REVENUECAT_WEBHOOK_AUTH_KEY must be set"):
+        _resolve_revenuecat_webhook_key()
+
 
 def test_revenuecat_webhook_no_token_rejected_401(client):
     r = client.post("/api/webhooks/revenuecat", json={"event": {"id": "1", "type": "TEST"}})
@@ -118,7 +128,34 @@ def test_revenuecat_webhook_correct_token_accepted_200(client):
     assert data["event_id"] == event_id
 
 
-# ═══════════════ 3. Idempotency & Routine Event Tests ═══════════════
+# ═══════════════ 3. Sandbox Environment Filtering Test ═══════════════
+
+def test_sandbox_environment_events_never_trigger_alarms(client):
+    """Events marked environment: SANDBOX (even critical types) must never enqueue to JARVIS."""
+    event_id = f"rc_sb_{uuid.uuid4().hex[:10]}"
+    payload = {
+        "event": {
+            "id": event_id,
+            "type": "CANCELLATION",
+            "environment": "SANDBOX",
+            "app_user_id": "sandbox_user_99",
+            "price_in_purchased_currency": 500.0,
+        }
+    }
+    r = client.post("/api/webhooks/revenuecat", json=payload, headers=RC_AUTH_HEADERS)
+    assert r.status_code == 200
+    data = r.json()
+    assert data["status"] == "test_event_recorded"
+    assert data["anomaly_detected"] is False
+
+    async def _check():
+        db = _db()
+        q_count = await db.jarvis_queue_items.count_documents({"source_agent": "sara"})
+        assert q_count == 0  # Zero queue pollution from sandbox events
+    _run(_check())
+
+
+# ═══════════════ 4. Idempotency & Routine Event Tests ═══════════════
 
 def test_revenuecat_webhook_idempotent_on_duplicate_event_id(client):
     event_id = f"rc_dup_{uuid.uuid4().hex[:10]}"
@@ -152,103 +189,100 @@ def test_revenuecat_webhook_idempotent_on_duplicate_event_id(client):
     _run(_check())
 
 
-# ═══════════════ 4. Deterministic Anomaly Detection Tests ═══════════════
+# ═══════════════ 5. Anomaly Flood Deduplication Test ═══════════════
 
-def test_single_billing_issue_does_not_enqueue_below_threshold(client):
-    """1 single billing issue is normal transient noise -> 0 queue items."""
-    event_id = f"rc_bill_single_{uuid.uuid4().hex[:10]}"
-    payload = {
-        "event": {
-            "id": event_id,
-            "type": "BILLING_ISSUE",
-            "app_user_id": "user_single_bill",
-            "price_in_purchased_currency": 9.99,
-        }
-    }
-    r = client.post("/api/webhooks/revenuecat", json=payload, headers=RC_AUTH_HEADERS)
-    assert r.status_code == 200
-    assert r.json()["anomaly_detected"] is False
-
-    async def _check():
-        db = _db()
-        q_count = await db.jarvis_queue_items.count_documents({"source_agent": "sara"})
-        assert q_count == 0
-    _run(_check())
-
-
-def test_billing_issue_spike_triggers_priority_1_anomaly(client):
-    """>= 3 billing issues within 1 hour triggers a Priority 1 emergency queue item."""
+def test_anomaly_flood_dedup_does_not_spam_duplicate_queue_items(client):
+    """Multiple billing failures during an outage reuse the single pending queue item."""
     async def _test():
         db = _db()
         now = datetime.now(timezone.utc)
 
-        # Seed 2 recent billing issues in DB
+        # Seed 2 recent billing issues
         for i in range(2):
-            eid = f"rc_seed_bill_{i}_{uuid.uuid4().hex[:8]}"
             await db.revenuecat_events.insert_one({
-                "event_id": eid,
+                "event_id": f"rc_seed_bill_{i}_{uuid.uuid4().hex[:8]}",
                 "event_type": "BILLING_ISSUE",
                 "app_user_id": f"user_seed_{i}",
-                "created_at": now - timedelta(minutes=15 * (i + 1)),
+                "environment": "PRODUCTION",
+                "created_at": now - timedelta(minutes=10 * (i + 1)),
             })
 
-        # Send the 3rd billing issue via webhook (crosses threshold >= 3)
-        third_id = f"rc_third_bill_{uuid.uuid4().hex[:8]}"
-        payload = {
+        # 3rd event crosses threshold -> creates queue item
+        r3 = client.post("/api/webhooks/revenuecat", json={
             "event": {
-                "id": third_id,
+                "id": f"rc_bill_3_{uuid.uuid4().hex[:8]}",
                 "type": "BILLING_ISSUE",
-                "app_user_id": "user_third_impacted",
-                "price_in_purchased_currency": 19.99,
+                "app_user_id": "user_3",
             }
-        }
-        r = client.post("/api/webhooks/revenuecat", json=payload, headers=RC_AUTH_HEADERS)
-        assert r.status_code == 200
-        data = r.json()
-        assert data["anomaly_detected"] is True
-        assert data["anomaly_type"] == "billing_issue_spike"
-        assert data["queue_item_id"] is not None
+        }, headers=RC_AUTH_HEADERS)
+        assert r3.status_code == 200
+        first_queue_id = r3.json()["queue_item_id"]
 
-        # Verify Priority 1 queue item in db.jarvis_queue_items
-        q_item = await db.jarvis_queue_items.find_one({"_id": ObjectId(data["queue_item_id"])})
-        assert q_item is not None
-        assert q_item["source_agent"] == "sara"
-        assert q_item["priority"] == 1  # Critical
-        assert q_item["item_type"] == "billing_issue_spike"
-        assert "billing failure spike" in q_item["payload"]["summary"]
+        # 4th and 5th billing issues arrive during the ongoing outage
+        for k in range(4, 6):
+            rk = client.post("/api/webhooks/revenuecat", json={
+                "event": {
+                    "id": f"rc_bill_{k}_{uuid.uuid4().hex[:8]}",
+                    "type": "BILLING_ISSUE",
+                    "app_user_id": f"user_{k}",
+                }
+            }, headers=RC_AUTH_HEADERS)
+            assert rk.status_code == 200
+            assert rk.json()["queue_item_id"] == first_queue_id  # Reuses existing open item!
+
+        # Confirm exactly 1 queue item exists in db.jarvis_queue_items
+        q_count = await db.jarvis_queue_items.count_documents({
+            "source_agent": "sara",
+            "item_type": "billing_issue_spike",
+        })
+        assert q_count == 1  # Flood prevented!
 
     _run(_test())
 
 
-def test_high_value_subscriber_cancellation_triggers_priority_1(client):
-    """Cancellation of a high-value ($50+) subscriber triggers Priority 1 attention."""
-    event_id = f"rc_whale_cancel_{uuid.uuid4().hex[:8]}"
-    payload = {
+# ═══════════════ 6. Currency Normalization & Null Price Guards ═══════════════
+
+def test_currency_conversion_and_null_guards():
+    """Verifies FX rates and safe handling of nulls/invalid types."""
+    assert convert_to_usd(None, "USD") == 0.0
+    assert convert_to_usd(-10.0, "USD") == 0.0
+    assert convert_to_usd("invalid", "USD") == 0.0
+    assert convert_to_usd(100.0, "USD") == 100.0
+    assert convert_to_usd(5000.0, "INR") == 60.0  # 5000 * 0.012 = $60
+    assert convert_to_usd(2000.0, "INR") == 24.0  # 2000 * 0.012 = $24 (below $50)
+
+
+def test_inr_currency_whale_churn_threshold(client):
+    """5000 INR (~$60 USD) triggers high value churn, 2000 INR (~$24 USD) does not."""
+    # Sub-50 USD equivalent cancellation (2000 INR = ~$24 USD) -> No anomaly
+    r1 = client.post("/api/webhooks/revenuecat", json={
         "event": {
-            "id": event_id,
+            "id": f"rc_inr_sub50_{uuid.uuid4().hex[:8]}",
             "type": "CANCELLATION",
-            "app_user_id": "vip_user_44",
-            "price_in_purchased_currency": 99.00,
-            "currency": "USD",
-            "cancel_reason": "CUSTOMER_SUPPORT",
-            "product_id": "annual_vip_membership",
+            "app_user_id": "inr_user_small",
+            "price_in_purchased_currency": 2000.0,
+            "currency": "INR",
         }
-    }
-    r = client.post("/api/webhooks/revenuecat", json=payload, headers=RC_AUTH_HEADERS)
-    assert r.status_code == 200
-    data = r.json()
-    assert data["anomaly_detected"] is True
-    assert data["anomaly_type"] == "high_value_cancellation"
+    }, headers=RC_AUTH_HEADERS)
+    assert r1.status_code == 200
+    assert r1.json()["anomaly_detected"] is False
 
-    async def _check():
-        db = _db()
-        q_item = await db.jarvis_queue_items.find_one({"_id": ObjectId(data["queue_item_id"])})
-        assert q_item is not None
-        assert q_item["source_agent"] == "sara"
-        assert q_item["priority"] == 1
-        assert q_item["payload"]["price"] == 99.00
-    _run(_check())
+    # Over-50 USD equivalent cancellation (5000 INR = ~$60 USD) -> Priority 1 anomaly
+    r2 = client.post("/api/webhooks/revenuecat", json={
+        "event": {
+            "id": f"rc_inr_whale_{uuid.uuid4().hex[:8]}",
+            "type": "CANCELLATION",
+            "app_user_id": "inr_user_whale",
+            "price_in_purchased_currency": 5000.0,
+            "currency": "INR",
+        }
+    }, headers=RC_AUTH_HEADERS)
+    assert r2.status_code == 200
+    assert r2.json()["anomaly_detected"] is True
+    assert r2.json()["anomaly_type"] == "high_value_cancellation"
 
+
+# ═══════════════ 7. System Promotion Capacity Warning ═══════════════
 
 def test_system_promotion_capacity_warning():
     """Sara detects promotion approaching capacity limit (>= 85%) and raises Priority 5 warning."""

@@ -147,6 +147,24 @@ WALLET_URL_SIGNING_SECRET = _resolve_wallet_download_secret()
 WALLET_DOWNLOAD_URL_TTL_SECONDS = 180
 
 
+def _resolve_revenuecat_webhook_key() -> str:
+    """Authenticates incoming RevenueCat subscription lifecycle webhooks (Task A.3 - Sara).
+    Strictly required at boot (consistent with WALLET_URL_SIGNING_SECRET and internal API tokens)
+    so an unset auth key immediately fails fast rather than silently accepting or failing requests."""
+    key = os.environ.get("REVENUECAT_WEBHOOK_AUTH_KEY")
+    if not key:
+        raise RuntimeError(
+            "REVENUECAT_WEBHOOK_AUTH_KEY must be set - it authenticates incoming "
+            "RevenueCat subscription lifecycle webhooks. Set it in backend/.env "
+            "for local dev and in Railway's service variables for deploys."
+        )
+    return key
+
+
+REVENUECAT_WEBHOOK_AUTH_KEY = _resolve_revenuecat_webhook_key()
+
+
+
 def _hash_session_token(token: str) -> str:
     """Session tokens are already high-entropy random values (uuid4().hex),
     so a plain SHA-256 hash is sufficient here - no need for slow/salted
@@ -4172,5 +4190,10 @@ async def health_check():
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
-    _booking_expiry_scheduler.shutdown(wait=False)
+    if getattr(_booking_expiry_scheduler, "running", False):
+        try:
+            _booking_expiry_scheduler.shutdown(wait=False)
+        except Exception:
+            pass
     client.close()
+
