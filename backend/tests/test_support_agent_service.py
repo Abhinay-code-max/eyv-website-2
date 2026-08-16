@@ -435,3 +435,343 @@ def test_log_support_turn_leaves_non_sensitive_text_untouched():
         assert stored["prompt"] == message
     finally:
         _cleanup_generation_logs(conversation_id)
+
+
+# ═══════════════ Task A.3: Denver Producer Wiring (jarvis_queue_items) ═══════════════
+
+def test_bug_report_enqueues_ticket_review_for_jarvis(monkeypatch):
+    """When Denver files a bug ticket, it must enqueue a ticket_review item for JARVIS."""
+    ticket_id = f"ticket_{ObjectId()}"
+
+    async def fake_check_and_resolve_ticket(gemini_client, http_client, **kwargs):
+        return support_agent_service.TicketDoc(
+            id=ticket_id, title=kwargs["title"], description=kwargs["description"],
+            kind=kwargs["kind"], status="reported",
+            reporter_user_ids=[kwargs["reporter_user_id"]], linked_chat_sessions=[kwargs["chat_session_id"]],
+            first_reported_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc),
+            approval="pending", notified_user_ids=[],
+        ).model_dump(mode="json")
+
+    monkeypatch.setattr(
+        support_agent_service.ticket_dedup_service, "check_and_resolve_ticket", fake_check_and_resolve_ticket,
+    )
+
+    fake_gemini = _FakeGeminiClient(_classification_json("bug"))
+    conversation_id = f"conv_jarvis_producer_test_{ObjectId()}"
+    try:
+        async def _do():
+            return await support_agent_service.handle_support_message(
+                _db(), fake_gemini, http_client=None,
+                internal_ticket_api_token="tok", user_id="user_producer_test",
+                conversation_id=conversation_id,
+                message="Font size on itinerary page is too small.",
+            )
+        result = _run(_do())
+        assert result.category == "bug"
+
+        # Verify Denver enqueued a jarvis_queue_items record
+        async def _check_queue():
+            db = _db()
+            item = await db.jarvis_queue_items.find_one({"source_agent": "denver", "item_type": "ticket_review", "payload.ticket_id": ticket_id})
+            assert item is not None, "expected a jarvis_queue_items entry from Denver"
+            assert item["priority"] == 5  # normal priority
+            assert item["status"] == "pending"
+            assert item["payload"]["title"] == "Font size on itinerary page is too small."
+            assert item["payload"]["conversation_id"] == conversation_id
+        _run(_check_queue())
+    finally:
+        _cleanup_generation_logs(conversation_id)
+        async def _cleanup_q():
+            await _db().jarvis_queue_items.delete_many({"source_agent": "denver", "payload.ticket_id": ticket_id})
+        _run(_cleanup_q())
+
+
+def test_critical_keyword_enqueues_with_priority_1(monkeypatch):
+    """When a bug report involves payments/checkout/auth, Denver sets priority=1."""
+    ticket_id = f"ticket_crit_{ObjectId()}"
+
+    async def fake_check_and_resolve_ticket(gemini_client, http_client, **kwargs):
+        return support_agent_service.TicketDoc(
+            id=ticket_id, title=kwargs["title"], description=kwargs["description"],
+            kind=kwargs["kind"], status="reported",
+            reporter_user_ids=[kwargs["reporter_user_id"]], linked_chat_sessions=[],
+            first_reported_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc),
+            approval="pending", notified_user_ids=[],
+        ).model_dump(mode="json")
+
+    monkeypatch.setattr(
+        support_agent_service.ticket_dedup_service, "check_and_resolve_ticket", fake_check_and_resolve_ticket,
+    )
+
+    fake_gemini = _FakeGeminiClient(_classification_json("bug"))
+    conversation_id = f"conv_jarvis_crit_test_{ObjectId()}"
+    try:
+        async def _do():
+            return await support_agent_service.handle_support_message(
+                _db(), fake_gemini, http_client=None,
+                internal_ticket_api_token="tok", user_id="user_crit_test",
+                conversation_id=conversation_id,
+                message="Stripe checkout payment failed with error 500.",
+            )
+        result = _run(_do())
+        assert result.category == "bug"
+
+        # Verify priority is 1
+        async def _check_queue():
+            db = _db()
+            item = await db.jarvis_queue_items.find_one({"source_agent": "denver", "payload.ticket_id": ticket_id})
+            assert item is not None
+            assert item["priority"] == 1, "expected priority 1 for payment/checkout keyword"
+        _run(_check_queue())
+    finally:
+        _cleanup_generation_logs(conversation_id)
+        async def _cleanup_q():
+            await _db().jarvis_queue_items.delete_many({"source_agent": "denver", "payload.ticket_id": ticket_id})
+        _run(_cleanup_q())
+
+
+def test_support_escalation_enqueues_escalation_for_jarvis(monkeypatch):
+    """When ticket creation fails, Denver enqueues a priority=1 support_escalation item."""
+    async def fake_failing_check(*args, **kwargs):
+        raise RuntimeError("Ticket API unavailable")
+
+    monkeypatch.setattr(
+        support_agent_service.ticket_dedup_service, "check_and_resolve_ticket", fake_failing_check,
+    )
+
+    fake_gemini = _FakeGeminiClient(_classification_json("bug"))
+    conversation_id = f"conv_jarvis_escalate_test_{ObjectId()}"
+    try:
+        async def _do():
+            return await support_agent_service.handle_support_message(
+                _db(), fake_gemini, http_client=None,
+                internal_ticket_api_token="tok", user_id="user_escalate_test",
+                conversation_id=conversation_id,
+                message="Something is completely broken.",
+            )
+        result = _run(_do())
+        assert result.escalated is True
+
+        # Verify support_escalation queue item
+        async def _check_queue():
+            db = _db()
+            item = await db.jarvis_queue_items.find_one({"source_agent": "denver", "item_type": "support_escalation", "payload.conversation_id": conversation_id})
+            assert item is not None, "expected support_escalation item enqueued for JARVIS"
+            assert item["priority"] == 1
+            assert "ticket creation failed" in item["payload"]["reason"]
+        _run(_check_queue())
+    finally:
+        _cleanup_generation_logs(conversation_id)
+        async def _cleanup_q():
+            await _db().jarvis_queue_items.delete_many({"source_agent": "denver", "payload.conversation_id": conversation_id})
+        _run(_cleanup_q())
+
+
+def test_duplicate_report_does_not_reenqueue_existing_item(monkeypatch):
+    """When a bug report is appended to an existing ticket, Denver must NOT create a duplicate queue item."""
+    ticket_id = f"ticket_dup_{ObjectId()}"
+
+    async def fake_check_and_resolve_ticket(gemini_client, http_client, **kwargs):
+        return support_agent_service.TicketDoc(
+            id=ticket_id, title="Button broken", description="Button broken",
+            kind="bug", status="reported",
+            reporter_user_ids=["user_1", "user_2"], linked_chat_sessions=[],
+            first_reported_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc),
+            approval="pending", notified_user_ids=[],
+        ).model_dump(mode="json")
+
+    monkeypatch.setattr(
+        support_agent_service.ticket_dedup_service, "check_and_resolve_ticket", fake_check_and_resolve_ticket,
+    )
+
+    fake_gemini = _FakeGeminiClient(_classification_json("bug"), _classification_json("bug"))
+    conv_1 = f"conv_dup_test_1_{ObjectId()}"
+    conv_2 = f"conv_dup_test_2_{ObjectId()}"
+    try:
+        async def _do():
+            # First turn -> creates queue item
+            await support_agent_service.handle_support_message(
+                _db(), fake_gemini, http_client=None, internal_ticket_api_token="tok",
+                user_id="user_1", conversation_id=conv_1, message="Button broken",
+            )
+            # Second turn (duplicate) -> should NOT create a second queue item
+            await support_agent_service.handle_support_message(
+                _db(), fake_gemini, http_client=None, internal_ticket_api_token="tok",
+                user_id="user_2", conversation_id=conv_2, message="Button broken",
+            )
+        _run(_do())
+
+        # Verify exactly ONE queue item exists
+        async def _check_count():
+            db = _db()
+            count = await db.jarvis_queue_items.count_documents({
+                "source_agent": "denver",
+                "item_type": "ticket_review",
+                "payload.ticket_id": ticket_id,
+            })
+            assert count == 1, f"expected 1 queue item, got {count}"
+        _run(_check_count())
+    finally:
+        _cleanup_generation_logs(conv_1)
+        _cleanup_generation_logs(conv_2)
+        async def _cleanup_q():
+            await _db().jarvis_queue_items.delete_many({"source_agent": "denver", "payload.ticket_id": ticket_id})
+        _run(_cleanup_q())
+
+
+def test_duplicate_report_boosts_priority_when_reporter_count_reaches_three(monkeypatch):
+    """When 3 or more users report the same issue, priority is boosted to 1."""
+    ticket_id = f"ticket_boost_{ObjectId()}"
+    reporters = ["u1"]
+
+    async def fake_check_and_resolve_ticket(gemini_client, http_client, **kwargs):
+        return support_agent_service.TicketDoc(
+            id=ticket_id, title="Itinerary lag", description="Itinerary lag",
+            kind="bug", status="reported",
+            reporter_user_ids=list(reporters), linked_chat_sessions=[],
+            first_reported_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc),
+            approval="pending", notified_user_ids=[],
+        ).model_dump(mode="json")
+
+    monkeypatch.setattr(
+        support_agent_service.ticket_dedup_service, "check_and_resolve_ticket", fake_check_and_resolve_ticket,
+    )
+
+    fake_gemini = _FakeGeminiClient(_classification_json("bug"), _classification_json("bug"))
+    conv_1 = f"conv_boost_test_1_{ObjectId()}"
+    conv_3 = f"conv_boost_test_3_{ObjectId()}"
+    try:
+        async def _do():
+            # First turn: 1 reporter -> priority 5
+            await support_agent_service.handle_support_message(
+                _db(), fake_gemini, http_client=None, internal_ticket_api_token="tok",
+                user_id="u1", conversation_id=conv_1, message="Itinerary page has lag",
+            )
+            item_initial = await _db().jarvis_queue_items.find_one({"payload.ticket_id": ticket_id})
+            assert item_initial["priority"] == 5
+
+            # Third reporter joins
+            reporters.extend(["u2", "u3"])
+            await support_agent_service.handle_support_message(
+                _db(), fake_gemini, http_client=None, internal_ticket_api_token="tok",
+                user_id="u3", conversation_id=conv_3, message="Itinerary page has lag",
+            )
+
+            # Priority boosted to 1
+            item_boosted = await _db().jarvis_queue_items.find_one({"payload.ticket_id": ticket_id})
+            assert item_boosted["priority"] == 1
+            assert len(item_boosted["payload"]["reporter_user_ids"]) == 3
+        _run(_do())
+    finally:
+        _cleanup_generation_logs(conv_1)
+        _cleanup_generation_logs(conv_3)
+        async def _cleanup_q():
+            await _db().jarvis_queue_items.delete_many({"source_agent": "denver", "payload.ticket_id": ticket_id})
+        _run(_cleanup_q())
+
+
+def test_escalation_flood_prevention_does_not_duplicate_pending_escalations(monkeypatch):
+    """Multiple error turns in the same conversation do not spam duplicate pending escalations."""
+    async def fake_failing_check(*args, **kwargs):
+        raise RuntimeError("DB connection timeout")
+
+    monkeypatch.setattr(
+        support_agent_service.ticket_dedup_service, "check_and_resolve_ticket", fake_failing_check,
+    )
+
+    fake_gemini = _FakeGeminiClient(_classification_json("bug"), _classification_json("bug"))
+    conv_id = f"conv_flood_test_{ObjectId()}"
+    try:
+        async def _do():
+            # Turn 1 -> enqueues escalation
+            await support_agent_service.handle_support_message(
+                _db(), fake_gemini, http_client=None, internal_ticket_api_token="tok",
+                user_id="u_flood", conversation_id=conv_id, message="Error 1",
+            )
+            # Turn 2 -> should not create second escalation
+            await support_agent_service.handle_support_message(
+                _db(), fake_gemini, http_client=None, internal_ticket_api_token="tok",
+                user_id="u_flood", conversation_id=conv_id, message="Error 2",
+            )
+
+            count = await _db().jarvis_queue_items.count_documents({
+                "source_agent": "denver",
+                "item_type": "support_escalation",
+                "payload.conversation_id": conv_id,
+            })
+            assert count == 1
+        _run(_do())
+    finally:
+        _cleanup_generation_logs(conv_id)
+        async def _cleanup_q():
+            await _db().jarvis_queue_items.delete_many({"source_agent": "denver", "payload.conversation_id": conv_id})
+        _run(_cleanup_q())
+
+
+def test_transient_quota_error_does_not_enqueue_emergency_escalation(monkeypatch):
+    """When Gemini throws a 429 quota error, Denver returns a gentle retry message and does not page JARVIS."""
+    async def fake_quota_error(*args, **kwargs):
+        raise RuntimeError("429 ResourceExhausted: Quota exceeded for model gemini-2.5-flash")
+
+    monkeypatch.setattr(
+        support_agent_service, "classify_message", fake_quota_error,
+    )
+
+    conv_id = f"conv_quota_test_{ObjectId()}"
+    try:
+        async def _do():
+            result = await support_agent_service.handle_support_message(
+                _db(), None, http_client=None, internal_ticket_api_token="tok",
+                user_id="u_quota", conversation_id=conv_id, message="Hello support",
+            )
+            assert result.category == "other"
+            assert "high load" in result.reply
+            assert result.escalated is False
+
+            count = await _db().jarvis_queue_items.count_documents({
+                "source_agent": "denver",
+                "payload.conversation_id": conv_id,
+            })
+            assert count == 0, "Quota errors should not enqueue queue items"
+        _run(_do())
+    finally:
+        _cleanup_generation_logs(conv_id)
+
+
+def test_word_boundary_avoids_keyword_false_positives(monkeypatch):
+    """Words like 'author' should not trigger priority 1 'auth' keyword matching."""
+    ticket_id = f"ticket_kw_{ObjectId()}"
+
+    async def fake_check_and_resolve_ticket(gemini_client, http_client, **kwargs):
+        return support_agent_service.TicketDoc(
+            id=ticket_id, title=kwargs["title"], description=kwargs["description"],
+            kind=kwargs["kind"], status="reported",
+            reporter_user_ids=["u_kw"], linked_chat_sessions=[],
+            first_reported_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc),
+            approval="pending", notified_user_ids=[],
+        ).model_dump(mode="json")
+
+    monkeypatch.setattr(
+        support_agent_service.ticket_dedup_service, "check_and_resolve_ticket", fake_check_and_resolve_ticket,
+    )
+
+    fake_gemini = _FakeGeminiClient(_classification_json("feature"))
+    conv_id = f"conv_kw_test_{ObjectId()}"
+    try:
+        async def _do():
+            await support_agent_service.handle_support_message(
+                _db(), fake_gemini, http_client=None, internal_ticket_api_token="tok",
+                user_id="u_kw", conversation_id=conv_id,
+                message="I am the author of a guidebook and would like a blog integration",
+            )
+            item = await _db().jarvis_queue_items.find_one({"payload.ticket_id": ticket_id})
+            assert item is not None
+            assert item["priority"] == 5, "expected priority 5 (normal) because 'author' != 'auth'"
+        _run(_do())
+    finally:
+        _cleanup_generation_logs(conv_id)
+        async def _cleanup_q():
+            await _db().jarvis_queue_items.delete_many({"source_agent": "denver", "payload.ticket_id": ticket_id})
+        _run(_cleanup_q())
+
+

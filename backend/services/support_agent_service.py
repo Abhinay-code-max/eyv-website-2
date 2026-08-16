@@ -414,7 +414,24 @@ _TICKET_FILED_REPLY = (
     "You can follow up on it any time by referencing this conversation."
 )
 _ESCALATED_REPLY = "I wasn't able to file that automatically - I've flagged it for a human teammate instead."
-_OTHER_REPLY = "Got it - let me know if there's anything travel- or booking-related I can help with."
+_CRITICAL_KEYWORDS_RE = re.compile(
+    r'\b(payment|checkout|stripe|booking|charge|auth|authentication|unauthorized|refund|crash|crashed|crashing)\b',
+    re.IGNORECASE,
+)
+
+
+def _determine_ticket_priority(kind: str, message: str) -> int:
+    """Determines queue priority: 1 for critical/high-impact issues (using word boundaries),
+    5 for normal."""
+    if _CRITICAL_KEYWORDS_RE.search(message):
+        return 1
+    return 5
+
+
+def _is_transient_quota_error(exc: Exception) -> bool:
+    """Detects transient LLM rate-limit / quota exhaustion (e.g. HTTP 429)."""
+    exc_str = str(exc).lower()
+    return "429" in exc_str or "quota" in exc_str or "resourceexhausted" in exc_str or "resource_exhausted" in exc_str
 
 
 class SupportAgentTurnResult(BaseModel):
@@ -435,9 +452,21 @@ async def handle_support_message(
     conversation_id: str,
     message: str,
 ) -> SupportAgentTurnResult:
-    """Entry point for one turn: classify, branch, log. See module
-    docstring for the full behavior of each branch."""
-    classification = await classify_message(gemini_client, message)
+    """Entry point for one turn: classify, branch, log, and enqueue for JARVIS.
+    See module docstring for the full behavior of each branch."""
+    try:
+        classification = await classify_message(gemini_client, message)
+    except Exception as exc:
+        if _is_transient_quota_error(exc):
+            logger.warning(f"Transient quota error during classification for conversation {conversation_id}: {exc}")
+            retry_reply = "Our support assistant is currently experiencing high load. Please try again in a moment."
+            await log_support_turn(
+                db, conversation_id=conversation_id, status="other:rate_limited",
+                message=message, response_text=retry_reply, error=str(exc),
+            )
+            return SupportAgentTurnResult(category="other", reply=retry_reply)
+        raise
+
     category = classification.category
 
     if category in ("bug", "feature"):
@@ -459,13 +488,93 @@ async def handle_support_message(
                 db, conversation_id=conversation_id, status=f"{category}:escalated",
                 message=message, response_text=_ESCALATED_REPLY, error=str(e),
             )
+            # Enqueue high-priority escalation for JARVIS with flood-guard
+            try:
+                from services.jarvis_queue_service import enqueue_jarvis_item
+                # Guard against duplicate escalation flood for the same conversation
+                existing_esc = await db.jarvis_queue_items.find_one({
+                    "source_agent": "denver",
+                    "item_type": "support_escalation",
+                    "payload.conversation_id": conversation_id,
+                    "status": "pending",
+                })
+                if not existing_esc:
+                    await enqueue_jarvis_item(
+                        db,
+                        source_agent="denver",
+                        item_type="support_escalation",
+                        priority=1,
+                        payload={
+                            "user_id": user_id,
+                            "conversation_id": conversation_id,
+                            "message": message,
+                            "reason": f"ticket creation failed: {e}",
+                        },
+                    )
+            except Exception as q_exc:
+                logger.warning(f"Failed to enqueue escalation item for conversation {conversation_id}: {q_exc}")
+
             return SupportAgentTurnResult(category=category, reply=_ESCALATED_REPLY, escalated=True)
+
+        # Enqueue ticket review for JARVIS with dedup protection & priority boost
+        try:
+            from services.jarvis_queue_service import enqueue_jarvis_item
+            ticket_id_str = str(ticket["id"])
+            reporters = ticket.get("reporter_user_ids") or []
+            num_reporters = len(reporters)
+
+            # Check if this ticket already has a pending review in JARVIS queue
+            existing_item = await db.jarvis_queue_items.find_one({
+                "source_agent": "denver",
+                "item_type": "ticket_review",
+                "payload.ticket_id": ticket_id_str,
+                "status": "pending",
+            })
+
+            if existing_item:
+                # If 3 or more users have now reported this same issue, boost priority to 1
+                if num_reporters >= 3 and existing_item.get("priority", 5) > 1:
+                    await db.jarvis_queue_items.update_one(
+                        {"_id": existing_item["_id"]},
+                        {"$set": {"priority": 1, "payload.reporter_user_ids": reporters}},
+                    )
+                    logger.info(f"Boosted priority to 1 for ticket {ticket_id_str} due to high reporter volume ({num_reporters} reporters)")
+                else:
+                    # Update reporter list in payload if needed without creating a duplicate item
+                    if reporters != existing_item.get("payload", {}).get("reporter_user_ids"):
+                        await db.jarvis_queue_items.update_one(
+                            {"_id": existing_item["_id"]},
+                            {"$set": {"payload.reporter_user_ids": reporters}},
+                        )
+            else:
+                # Brand new ticket in JARVIS queue
+                priority = _determine_ticket_priority(category, message)
+                if num_reporters >= 3:
+                    priority = 1
+                await enqueue_jarvis_item(
+                    db,
+                    source_agent="denver",
+                    item_type="ticket_review",
+                    priority=priority,
+                    payload={
+                        "ticket_id": ticket_id_str,
+                        "title": ticket["title"],
+                        "description": ticket["description"],
+                        "kind": ticket["kind"],
+                        "reporter_user_ids": reporters,
+                        "linked_chat_sessions": ticket.get("linked_chat_sessions", []),
+                        "conversation_id": conversation_id,
+                    },
+                )
+        except Exception as q_exc:
+            logger.warning(f"Failed to enqueue JARVIS queue item for ticket {ticket.get('id')}: {q_exc}")
 
         await log_support_turn(
             db, conversation_id=conversation_id, status=f"{category}:ticket_created",
             message=message, response_text=_TICKET_FILED_REPLY,
         )
         return SupportAgentTurnResult(category=category, reply=_TICKET_FILED_REPLY, ticket=ticket)
+
 
     if category == "question":
         reply = await _answer_question(db, gemini_client, user_id=user_id, message=message)
@@ -481,3 +590,4 @@ async def handle_support_message(
         message=message, response_text=_OTHER_REPLY,
     )
     return SupportAgentTurnResult(category=category, reply=_OTHER_REPLY)
+

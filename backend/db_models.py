@@ -620,3 +620,82 @@ class PromotionDoc(BaseModel):
         if self.usage_cap is not None and self.redemption_count > self.usage_cap:
             raise ValueError("redemption_count must not exceed usage_cap")
         return self
+
+
+# ── JARVIS Multi-Agent Queue & Coordination Models (Task A.1) ──────────────
+
+JARVIS_QUEUE_STATUSES = ("pending", "in_progress", "resolved", "rejected", "failed")
+
+
+class JarvisQueueItemDoc(BaseModel):
+    """db.jarvis_queue_items - unified queue for all EYV sub-agents
+    (Denver/Bob/Sara) feeding JARVIS (Claude coordinator brain).
+    Generic payload rather than a separate table per agent.
+    Priority: 1 (critical/highest) -> 5 (normal) -> 10 (low)."""
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+    id: Optional[str] = Field(default=None, alias="_id")
+    source_agent: str
+    item_type: str
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    priority: int = 5
+    status: Literal[JARVIS_QUEUE_STATUSES] = "pending"
+    created_at: datetime
+    resolved_at: Optional[datetime] = None
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def _stringify_object_id(cls, v: Any) -> Optional[str]:
+        return str(v) if v is not None else v
+
+
+class JarvisDecisionDoc(BaseModel):
+    """db.jarvis_decisions - records of decisions submitted back by JARVIS
+    upon reasoning about queue items or autonomous agent actions."""
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+    id: Optional[str] = Field(default=None, alias="_id")
+    queue_item_id: Optional[str] = None
+    source_agent: str = "jarvis"
+    decision_type: str = "general"
+    action: Any = None
+    reason: Optional[str] = None
+    context: Dict[str, Any] = Field(default_factory=dict)
+    details: Dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def _stringify_object_id(cls, v: Any) -> Optional[str]:
+        return str(v) if v is not None else v
+
+
+
+JARVIS_APPROVAL_STATUSES = ("pending", "approved", "rejected")
+
+
+class JarvisApprovalDoc(BaseModel):
+    """db.jarvis_approvals - pending approval records created when JARVIS
+    decides an action requires human sign-off (Abhinay).
+    Stores approval_token_hash (sha256 digest) at rest with expires_at,
+    never the raw token in plaintext."""
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+    id: Optional[str] = Field(default=None, alias="_id")
+    queue_item_id: Optional[str] = None
+    decision_id: Optional[str] = None
+    action_type: str
+    title: str
+    description: str
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    requester_agent: str = "jarvis"
+    approval_token_hash: str
+    status: Literal[JARVIS_APPROVAL_STATUSES] = "pending"
+    resolution_note: Optional[str] = None
+    created_at: datetime
+    expires_at: datetime
+    resolved_at: Optional[datetime] = None
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def _stringify_object_id(cls, v: Any) -> Optional[str]:
+        return str(v) if v is not None else v
+
+

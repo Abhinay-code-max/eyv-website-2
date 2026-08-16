@@ -46,6 +46,8 @@ from services import booking_expiry_service
 from services import generation_expiry_service
 from services import index_service
 from services import sentry_service
+from services import support_agent_service
+from services import notification_service
 from services import analytics_service
 from services.request_id_middleware import RequestIDMiddleware, RequestIDLogFilter, request_id_var
 # Hard-fails at import time if INTERNAL_TICKET_API_TOKEN is unset (see that
@@ -62,7 +64,7 @@ from internal_analytics_api import router as internal_analytics_router
 # internal_jarvis_api.py's own module docstring. Mounted at the bare
 # "/jarvis" prefix (not "/api/internal/jarvis") because eyv_poller (the
 # JARVIS-side poller, not part of this repo) already polls that exact path.
-from internal_jarvis_api import router as internal_jarvis_router
+from internal_jarvis_api import router as internal_jarvis_router, public_router as internal_jarvis_public_router
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from rate_limit_keys import get_trusted_client_ip
@@ -172,6 +174,36 @@ app.state.tickets_db = db
 app.state.analytics_db = db
 # Same reasoning as tickets_db above, for internal_jarvis_api.py.
 app.state.jarvis_db = db
+
+
+@functools.lru_cache(maxsize=1)
+def _get_internal_ticket_http_client() -> httpx.AsyncClient:
+    """Lazy singleton ASGI-transport client for calling this same process's
+    own /api/internal/tickets/* routes in-process (support_agent_service.py/
+    notification_service.py both expect an httpx.AsyncClient pointed at
+    this backend) - internal_tickets_api's router is mounted on this same
+    `app` (see app.include_router(internal_tickets_router) below), so
+    ASGITransport drives the exact same request/dependency/auth/rate-limit/
+    audit-logging chain a real HTTP round-trip would, just without a socket.
+    Safe as a lazy singleton here specifically because this is the real
+    running server - there is only ever ONE real event loop (uvicorn's)
+    driving this whole process, unlike the test suite, where a second,
+    independently-created event loop touching the same app's Motor client
+    caused real cross-loop corruption (see
+    tests/test_support_agent_service.py's own note on why its tests use a
+    fake HTTP client instead of this exact pattern)."""
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://internal")
+
+
+def _internal_ticket_api_token() -> str:
+    """Reads INTERNAL_TICKET_API_TOKEN the same way internal_tickets_api.py
+    itself does (re-read on every call, not cached - see that module's own
+    _current_internal_ticket_api_token docstring for why: instant
+    revocation). Read directly from the environment here rather than
+    importing that module's own private helper - this app's convention is
+    every module reads its own secrets from os.environ directly."""
+    return os.environ.get('INTERNAL_TICKET_API_TOKEN', '')
+
 
 # Captured once at import time (i.e. whenever this worker process actually
 # started running THIS copy of the code) - GET /api/ surfaces both so a
@@ -2430,6 +2462,78 @@ async def get_chat_history(trip_id: str, request: Request):
     }
 
 
+# ── Support agent (EYV Agent System Phase 4, Step 4.4) ──────────────────
+#
+# User-facing wrapper around support_agent_service.handle_support_message -
+# that module itself has no HTTP surface of its own (it's a plain service
+# function taking db/gemini_client/http_client directly, same shape as
+# chat_service's functions above), and the internal ticket API it calls
+# into is deliberately gated behind INTERNAL_TICKET_API_TOKEN, not a user
+# session - not something the frontend could call even if it wanted to.
+# This route is the (new, Step 4.4) session-authenticated entry point that
+# actually reaches it.
+
+class SupportMessageRequest(BaseModel):
+    message: str
+
+    @field_validator("message")
+    @classmethod
+    def _non_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("message must not be blank")
+        return v
+
+
+@api_router.post("/support/message")
+@limiter.limit("15/minute")  # per-IP, same shape as /chat/stream above
+@limiter.limit("15/minute", key_func=_session_token_key)  # per-authenticated-user
+async def support_message(body: SupportMessageRequest, request: Request):
+    user = await get_current_user(request)
+    result = await support_agent_service.handle_support_message(
+        db, _get_gemini_client(), _get_internal_ticket_http_client(),
+        internal_ticket_api_token=_internal_ticket_api_token(),
+        user_id=user.user_id,
+        # One stable conversation id per user rather than one per browser
+        # tab/session - this widget is a single ongoing support thread per
+        # user (see log_support_turn's own trip_id-repurposing docstring in
+        # support_agent_service.py), not a per-visit chat log.
+        conversation_id=f"support_{user.user_id}",
+        message=body.message,
+    )
+    return {
+        "category": result.category,
+        "reply": result.reply,
+        "ticket": result.ticket,
+        "escalated": result.escalated,
+    }
+
+
+# ── Notifications (EYV Agent System Phase 4, Step 4.4) ──────────────────
+#
+# User-facing wrappers around notification_service.py's own query functions
+# (list_notifications/count_unread_notifications, from Step 4.3) - that
+# module has no HTTP surface of its own either. mark_notifications_read
+# (below, in notification_service.py) is new in this step - the "opening
+# the list marks everything in it read" behavior these routes expose.
+
+@api_router.get("/notifications")
+async def get_notifications(request: Request):
+    user = await get_current_user(request)
+    notifications = await notification_service.list_notifications(db, user.user_id)
+    unread_count = await notification_service.count_unread_notifications(db, user.user_id)
+    return {"notifications": notifications, "unread_count": unread_count}
+
+
+@api_router.patch("/notifications/read")
+async def mark_notifications_read_route(request: Request):
+    """Bulk mark-all-as-read for the current user, not a per-id route -
+    matches the UI behavior this exposes ("opening/viewing the list marks
+    them read"), not a per-notification click-to-dismiss interaction."""
+    user = await get_current_user(request)
+    count = await notification_service.mark_notifications_read(db, user.user_id)
+    return {"marked_read": count}
+
+
 @api_router.get("/")
 async def root():
     return {
@@ -3986,6 +4090,7 @@ async def startup_event():
 app.include_router(api_router)
 app.include_router(internal_tickets_router)
 app.include_router(internal_analytics_router)
+app.include_router(internal_jarvis_public_router)
 app.include_router(internal_jarvis_router)
 
 app.add_middleware(

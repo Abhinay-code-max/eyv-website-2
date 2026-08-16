@@ -74,3 +74,25 @@ async def ensure_indexes(db) -> None:
     # append-only, browsed-by-recency shape as ticket_agent_audit_log above,
     # just for the analytics router's own requests.
     await db.analytics_agent_audit_log.create_index([("timestamp", -1)])
+
+    # jarvis_queue_items (internal_jarvis_api.py, Task A.1) - compound index
+    # for polling unresolved items (status="pending", priority ascending, created_at ascending)
+    # and filtering by source_agent.
+    await db.jarvis_queue_items.create_index([("status", 1), ("priority", 1), ("created_at", 1)])
+    await db.jarvis_queue_items.create_index("source_agent")
+
+    # jarvis_decisions (internal_jarvis_api.py, Task A.1)
+    await db.jarvis_decisions.create_index("queue_item_id")
+    await db.jarvis_decisions.create_index([("created_at", -1)])
+
+    # jarvis_approvals (internal_jarvis_api.py, Task A.1)
+    await db.jarvis_approvals.create_index("approval_token_hash", unique=True)
+    await db.jarvis_approvals.create_index("status")
+    await db.jarvis_approvals.create_index([("created_at", -1)])
+    await db.jarvis_approvals.create_index("expires_at", expireAfterSeconds=0)
+
+
+    # jarvis_agent_audit_log (internal_jarvis_api.py)
+    await db.jarvis_agent_audit_log.create_index([("timestamp", -1)])
+    await db.jarvis_agent_audit_log.create_index("route")
+
