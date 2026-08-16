@@ -60,7 +60,22 @@ async def enqueue_jarvis_item(
     }
     result = await db.jarvis_queue_items.insert_one(item_dict)
     item_dict["_id"] = str(result.inserted_id)
+
+    # Asynchronously dispatch Telegram push alert if priority <= 5
+    if priority <= 5:
+        try:
+            from services.telegram_bot_service import is_telegram_configured, send_queue_alert
+            if is_telegram_configured():
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(send_queue_alert(db, item_dict))
+                except RuntimeError:
+                    pass
+        except Exception as tg_err:
+            logger.debug(f"Telegram queue alert dispatch skipped: {tg_err}")
+
     return JarvisQueueItemDoc(**item_dict)
+
 
 
 async def resolve_jarvis_item(

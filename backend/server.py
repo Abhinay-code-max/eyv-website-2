@@ -3961,6 +3961,40 @@ async def revenuecat_webhook(request: Request):
     return res
 
 
+@limiter.limit("120/minute")
+async def _telegram_preauth_marker(request: Request) -> None:
+    """Marker function for SlowAPI bookkeeping of Telegram pre-auth flood gate."""
+    pass
+
+
+@api_router.post("/webhooks/telegram")
+@api_router.post("/webhook/telegram")
+async def telegram_webhook(request: Request):
+    """Handle incoming Telegram Bot webhook updates (slash commands and callback queries).
+    Includes a pre-auth flood gate before secret header validation to prevent slowapi flag collisions."""
+    # 1. Pre-auth rate-limit flood gate (120/min per IP)
+    limiter._check_request_limit(request, _telegram_preauth_marker, False)
+
+
+    # 2. Secret header validation
+    expected_secret = os.environ.get("TELEGRAM_SECRET_TOKEN", "").strip()
+    if expected_secret:
+        secret_header = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "").strip()
+        if not secret_header or not hmac.compare_digest(secret_header, expected_secret):
+            raise HTTPException(status_code=401, detail="Invalid Telegram webhook secret token")
+
+    # 3. JSON payload parsing
+    try:
+        update_payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
+    from services.telegram_bot_service import process_telegram_update
+    internal_client = _get_internal_ticket_http_client()
+    return await process_telegram_update(db, update_payload, internal_ticket_client=internal_client)
+
+
+
 @api_router.get("/subscription/status")
 
 async def get_subscription_status(request: Request):
