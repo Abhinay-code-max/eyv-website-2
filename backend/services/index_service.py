@@ -100,4 +100,10 @@ async def ensure_indexes(db) -> None:
     await db.marketing_campaigns.create_index([("status", 1), ("created_at", -1)])
     await db.marketing_campaigns.create_index("channel")
 
+    # revenuecat_events (analytics_agent_service.py, Task A.3 - Sara)
+    await db.revenuecat_events.create_index("event_id", unique=True)
+    await db.revenuecat_events.create_index([("event_type", 1), ("created_at", -1)])
+    await db.revenuecat_events.create_index("app_user_id")
+
+
 

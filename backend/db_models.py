@@ -652,7 +652,48 @@ class MarketingCampaignDoc(BaseModel):
         return str(v) if v is not None else v
 
 
+# ── Analytics & Sara Agent Models (Task A.3) ────────────────────────────────
+
+REVENUECAT_EVENT_TYPES = (
+    "INITIAL_PURCHASE",
+    "RENEWAL",
+    "CANCELLATION",
+    "UNCANCELLATION",
+    "NON_RENEWING_PURCHASE",
+    "SUBSCRIPTION_PAUSED",
+    "EXPIRATION",
+    "BILLING_ISSUE",
+    "PRODUCT_CHANGE",
+    "TRANSFER",
+    "TEST",
+)
+
+
+class RevenueCatEventDoc(BaseModel):
+    """db.revenuecat_events - subscription lifecycle audit log from RevenueCat webhooks."""
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+    id: Optional[str] = Field(default=None, alias="_id")
+    event_id: str
+    event_type: str
+    app_user_id: str
+    original_app_user_id: Optional[str] = None
+    product_id: Optional[str] = None
+    entitlement_id: Optional[str] = None
+    price_in_purchased_currency: Optional[float] = None
+    currency: Optional[str] = None
+    environment: str = "PRODUCTION"
+    cancel_reason: Optional[str] = None
+    raw_payload: Dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def _stringify_object_id(cls, v: Any) -> Optional[str]:
+        return str(v) if v is not None else v
+
+
 # ── JARVIS Multi-Agent Queue & Coordination Models (Task A.1) ──────────────
+
 
 
 JARVIS_QUEUE_STATUSES = ("pending", "in_progress", "resolved", "rejected", "failed")

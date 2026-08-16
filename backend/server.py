@@ -3898,8 +3898,34 @@ async def _subscription_status_payload(user_id: str) -> Dict[str, Any]:
         'available_plans': await _get_premium_plans(),
     }
 
+@api_router.post("/webhooks/revenuecat")
+@api_router.post("/webhook/revenuecat")
+async def revenuecat_webhook(request: Request):
+    """Handle RevenueCat subscription lifecycle webhook events (Task A.3 - Sara).
+    Authenticated via REVENUECAT_WEBHOOK_AUTH_KEY using constant-time hmac.compare_digest."""
+    auth_header = request.headers.get("Authorization", "")
+    provided_key = auth_header[len("Bearer "):] if auth_header.startswith("Bearer ") else auth_header
+    expected_key = os.environ.get("REVENUECAT_WEBHOOK_AUTH_KEY", "")
+
+    if not expected_key:
+        logger.error("REVENUECAT_WEBHOOK_AUTH_KEY is not configured")
+        raise HTTPException(status_code=500, detail="RevenueCat webhook auth key not configured")
+
+    if not hmac.compare_digest(provided_key, expected_key):
+        raise HTTPException(status_code=401, detail="Invalid or missing RevenueCat webhook authorization")
+
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
+    from services.analytics_agent_service import record_revenuecat_event
+    res = await record_revenuecat_event(db, payload)
+    return res
+
 
 @api_router.get("/subscription/status")
+
 async def get_subscription_status(request: Request):
     user = await get_current_user(request)
     # Pure read - no write-back here. Under the old design this endpoint
