@@ -17,6 +17,7 @@ const PaymentSuccessPage = () => {
   const [status, setStatus] = useState('checking');
   const [details, setDetails] = useState(null);
   const pollCount = useRef(0);
+  const hasTrackedBooking = useRef(false);
 
   // useCallback with no deps: doesn't close over anything reactive (pollCount
   // is a ref, MAX_POLLS is a module-level constant), so this reference never
@@ -41,6 +42,16 @@ const PaymentSuccessPage = () => {
 
       if (response.data.payment_status === 'paid') {
         setStatus('success');
+        if (!hasTrackedBooking.current && window.posthog) {
+          hasTrackedBooking.current = true;
+          const tier = response.data?.metadata?.pricing_tier ||
+                       response.data?.metadata?.plan_type ||
+                       response.data?.metadata?.package_id ||
+                       'standard';
+          window.posthog.capture('booking_completed', {
+            pricing_tier: String(tier).toLowerCase(),
+          });
+        }
         return;
       } else if (response.data.status === 'expired') {
         setStatus('expired');

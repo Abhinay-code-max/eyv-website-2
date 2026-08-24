@@ -1,10 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { useLocation } from 'react-router-dom';
+import { useLocation, Link } from 'react-router-dom';
 import { motion, useReducedMotion } from 'framer-motion';
 import { LogIn, Globe, Plane, MapPin, Calendar, Users, Sparkles, Star } from 'lucide-react';
 import EYVLogo from '../components/EYVLogo';
 import { AUTH } from '../constants/testIds';
-import { API_URL, POST_LOGIN_REDIRECT_KEY } from '../constants';
+import { API_URL, POST_LOGIN_REDIRECT_KEY, AUTH_INTENT_KEY } from '../constants';
 
 /* ── tiny floating particle ───────────────────────────────────────── */
 const PARTICLES = Array.from({ length: 18 }, (_, i) => ({
@@ -62,6 +62,7 @@ const LoginPage = () => {
     // unloads), so React Router state can't survive it - stash the page
     // the user was trying to reach in sessionStorage and let AuthCallback
     // pick it back up once the session is established.
+    sessionStorage.setItem(AUTH_INTENT_KEY, 'login');
     const from = location.state?.from;
     if (from) {
       sessionStorage.setItem(
@@ -208,10 +209,10 @@ const LoginPage = () => {
             >
               <h2 className="text-4xl md:text-5xl font-semibold text-[#1C1917] mb-3 leading-tight"
                 style={{ fontFamily: 'Cormorant Garamond, serif' }}>
-                Welcome Back
+                Log In to EYV
               </h2>
               <p className="text-[#57534E] text-base">
-                Sign in to start planning your dream vacation
+                Sign in to access your saved trips, bookings, and rewards
               </p>
             </motion.div>
 
@@ -238,15 +239,25 @@ const LoginPage = () => {
                   </svg>
                 </span>
                 <span className="relative z-10 group-hover:text-white transition-colors duration-300">
-                  Continue with Google
+                  Log in with Google
                 </span>
                 <LogIn size={18} className="relative z-10 ml-auto text-[#57534E] group-hover:text-white transition-colors duration-300" />
               </button>
             </motion.div>
 
+            {/* Switcher to Signup */}
+            <div className="mt-4 text-center">
+              <p className="text-sm text-[#57534E]">
+                Don't have an account?{' '}
+                <Link to="/signup" className="text-[#C47245] font-semibold hover:underline">
+                  Sign up
+                </Link>
+              </p>
+            </div>
+
             {/* Divider */}
             <motion.div
-              className="flex items-center gap-4 my-7"
+              className="flex items-center gap-4 my-6"
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               transition={{ delay: 0.7 }}
@@ -276,15 +287,23 @@ const LoginPage = () => {
           </div>
         </motion.div>
 
-        {/* Tagline */}
-        <motion.p
-          className="text-center mt-6 text-sm text-[#57534E]"
+        {/* Tagline & Legal Agreement */}
+        <motion.div
+          className="text-center mt-6 space-y-2"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           transition={{ delay: 0.9 }}
         >
-          Enjoy Your Vacation — We Plan Everything.
-        </motion.p>
+          <p className="text-sm text-[#57534E]">
+            Enjoy Your Vacation — We Plan Everything.
+          </p>
+          <p className="text-xs text-[#78716C] leading-relaxed max-w-xs mx-auto">
+            By signing in, you agree to our{' '}
+            <Link to="/terms" className="underline hover:text-[#C47245]">Terms</Link>,{' '}
+            <Link to="/privacy" className="underline hover:text-[#C47245]">Privacy Policy</Link>, and{' '}
+            <Link to="/refund-policy" className="underline hover:text-[#C47245]">Refund Policy</Link>.
+          </p>
+        </motion.div>
       </motion.div>
     </div>
   );

@@ -434,6 +434,18 @@ async def get_ticket_queue(
     return {"tickets": tickets, "status_filter": status}
 
 
+@router.get("/stats")
+@_limiter.limit(TICKET_API_RATE_LIMIT, key_func=get_bearer_token_key)
+async def get_ticket_stats(request: Request) -> Dict[str, Any]:
+    """Summary counts of tickets by status for operational monitoring."""
+    db = request.app.state.tickets_db
+    total = await db.tickets.count_documents({})
+    open_count = await db.tickets.count_documents({"status": {"$in": ["open", "in_progress", "reported", "triaged"]}})
+    resolved = await db.tickets.count_documents({"status": "resolved"})
+    request.state.audit_summary = {"total": total, "open": open_count, "resolved": resolved}
+    return {"total": total, "open": open_count, "resolved": resolved}
+
+
 @router.get("/{id}")
 @_limiter.limit(TICKET_API_RATE_LIMIT, key_func=get_bearer_token_key)
 async def get_ticket(id: str, request: Request) -> Dict[str, Any]:

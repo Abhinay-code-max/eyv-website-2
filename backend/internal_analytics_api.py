@@ -54,16 +54,19 @@ import hmac
 import logging
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Set
+from typing import Any, Dict, List, Literal, Optional, Set
 
+from bson import ObjectId
+from bson.errors import InvalidId
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import Response
 from fastapi.routing import APIRoute
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from slowapi import Limiter
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from db_models import PromotionDoc
+from db_models import MarketingCampaignDoc, PromotionDoc
 from rate_limit_keys import get_bearer_token_key, get_trusted_client_ip
 
 logger = logging.getLogger(__name__)
@@ -344,3 +347,153 @@ async def get_promotion_stats(request: Request) -> Dict[str, Any]:
 
     request.state.audit_summary = {"promotions_queried": True, "result_count": len(promotions)}
     return {"promotions": promotions}
+
+
+class PromotionCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    code: str
+    discount_type: Literal["percent", "fixed"] = "percent"
+    discount_value: float = Field(gt=0)
+    valid_days: int = Field(default=30, gt=0)
+    usage_cap: Optional[int] = Field(default=100, gt=0)
+
+    @field_validator("code")
+    @classmethod
+    def _clean_code(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("code must not be blank")
+        return v.strip().upper()
+
+
+@router.post("/promotions")
+@_limiter.limit(ANALYTICS_API_RATE_LIMIT, key_func=get_bearer_token_key)
+async def post_promotion(request: Request, req: PromotionCreateRequest) -> Dict[str, Any]:
+    """Creates a new promotion code in db.promotions for approved marketing campaigns."""
+    db = request.app.state.analytics_db
+    now = datetime.now(timezone.utc)
+    existing = await db.promotions.find_one({"code": req.code})
+    if existing:
+        raise HTTPException(status_code=409, detail=f"Promotion code {req.code} already exists")
+
+    doc = {
+        "code": req.code,
+        "discount_type": req.discount_type,
+        "discount_value": req.discount_value,
+        "valid_from": now,
+        "valid_until": now + timedelta(days=req.valid_days),
+        "usage_cap": req.usage_cap,
+        "redemption_count": 0,
+        "created_at": now,
+    }
+    validated = PromotionDoc(**doc)
+    await db.promotions.insert_one(doc)
+    request.state.audit_summary = {"promo_code": req.code, "discount_value": req.discount_value}
+    return {"promotion": validated.model_dump(mode="json"), "status": "created"}
+
+
+# ── Marketing Campaigns CRUD ───────────────────────────────────────────────
+
+class CampaignCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str
+    channel: str
+    status: str = "pending_approval"
+    content: Dict[str, Any] = Field(default_factory=dict)
+    target_audience: Optional[str] = "all_travelers"
+    spend_budget: float = 0.0
+    discount_config: Optional[Dict[str, Any]] = None
+    scheduled_for: Optional[datetime] = None
+
+    @field_validator("title", "channel")
+    @classmethod
+    def _non_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("must not be blank")
+        return v.strip()
+
+
+class CampaignUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    status: Optional[Literal["draft", "pending_approval", "approved", "published", "failed", "cancelled"]] = None
+    external_post_id: Optional[str] = None
+    promo_code: Optional[str] = None
+    published_at: Optional[datetime] = None
+    error_message: Optional[str] = None
+
+
+def _parse_object_id(id_str: str) -> ObjectId:
+    try:
+        return ObjectId(id_str)
+    except (InvalidId, TypeError):
+        raise HTTPException(status_code=400, detail=f"Invalid ID format: {id_str}")
+
+
+@router.post("/campaigns")
+@_limiter.limit(ANALYTICS_API_RATE_LIMIT, key_func=get_bearer_token_key)
+async def post_campaign(request: Request, req: CampaignCreateRequest) -> Dict[str, Any]:
+    """Stages a new campaign draft in db.marketing_campaigns."""
+    db = request.app.state.analytics_db
+    now = datetime.now(timezone.utc)
+    doc = {
+        "title": req.title,
+        "channel": req.channel,
+        "status": req.status,
+        "content": req.content,
+        "target_audience": req.target_audience,
+        "spend_budget": req.spend_budget,
+        "discount_config": req.discount_config,
+        "created_at": now,
+        "scheduled_for": req.scheduled_for or (now + timedelta(hours=24)),
+    }
+    res = await db.marketing_campaigns.insert_one(doc)
+    campaign_id = str(res.inserted_id)
+    doc["_id"] = campaign_id
+    request.state.audit_summary = {"campaign_id": campaign_id, "title": req.title, "channel": req.channel}
+    return {"campaign": MarketingCampaignDoc(**doc).model_dump(mode="json"), "campaign_id": campaign_id, "status": "created"}
+
+
+@router.get("/campaigns/stats")
+@_limiter.limit(ANALYTICS_API_RATE_LIMIT, key_func=get_bearer_token_key)
+async def get_campaign_stats(request: Request) -> Dict[str, Any]:
+    """Summary counts of marketing campaigns for /status and /stats operational commands."""
+    db = request.app.state.analytics_db
+    total = await db.marketing_campaigns.count_documents({})
+    published = await db.marketing_campaigns.count_documents({"status": "published"})
+    pending = await db.marketing_campaigns.count_documents({"status": "pending_approval"})
+    request.state.audit_summary = {"total": total, "published": published, "pending": pending}
+    return {"total": total, "published": published, "pending": pending}
+
+
+@router.get("/campaigns/{id}")
+@_limiter.limit(ANALYTICS_API_RATE_LIMIT, key_func=get_bearer_token_key)
+async def get_campaign(id: str, request: Request) -> Dict[str, Any]:
+    """Fetches a single marketing campaign by ID."""
+    db = request.app.state.analytics_db
+    obj_id = _parse_object_id(id)
+    doc = await db.marketing_campaigns.find_one({"_id": obj_id})
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"Campaign {id} not found")
+    request.state.audit_summary = {"campaign_id": id, "status": doc.get("status")}
+    return {"campaign": MarketingCampaignDoc(**doc).model_dump(mode="json")}
+
+
+@router.patch("/campaigns/{id}")
+@_limiter.limit(ANALYTICS_API_RATE_LIMIT, key_func=get_bearer_token_key)
+async def patch_campaign(id: str, req: CampaignUpdateRequest, request: Request) -> Dict[str, Any]:
+    """Updates campaign execution and publication status."""
+    db = request.app.state.analytics_db
+    obj_id = _parse_object_id(id)
+    update_fields = {k: v for k, v in req.model_dump(exclude_unset=True).items()}
+    if not update_fields:
+        raise HTTPException(status_code=400, detail="No fields provided for update")
+
+    updated = await db.marketing_campaigns.find_one_and_update(
+        {"_id": obj_id},
+        {"$set": update_fields},
+        return_document=True,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail=f"Campaign {id} not found")
+    request.state.audit_summary = {"campaign_id": id, "updates": list(update_fields.keys())}
+    return {"campaign": MarketingCampaignDoc(**updated).model_dump(mode="json"), "status": "updated"}
+

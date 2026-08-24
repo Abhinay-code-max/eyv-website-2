@@ -24,19 +24,19 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-os.environ["CORS_ORIGINS"] = "http://localhost:3000"
-os.environ["WALLET_URL_SIGNING_SECRET"] = "test-wallet-secret"
-os.environ["INTERNAL_TICKET_API_TOKEN"] = "test-ticket-token"
-os.environ["INTERNAL_ANALYTICS_API_TOKEN"] = "test-analytics-token"
-os.environ["JARVIS_QUEUE_API_TOKEN"] = "test-jarvis-queue-token"
-os.environ["ADMIN_API_KEY"] = "test-master-admin-key-secret"
-os.environ["REVENUECAT_WEBHOOK_AUTH_KEY"] = "test-revenuecat-secret-key"
-os.environ["TELEGRAM_BOT_TOKEN"] = "test-telegram-bot-token"
-os.environ["TELEGRAM_SECRET_TOKEN"] = "test-telegram-secret-token"
-os.environ["ADMIN_TELEGRAM_CHAT_ID"] = "987654321"
-os.environ["BUFFER_SANDBOX_MODE"] = "true"
-os.environ["MONGO_URL"] = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
-os.environ["DB_NAME"] = os.environ.get("DB_NAME", "test_database")
+os.environ.setdefault("CORS_ORIGINS", "http://localhost:3000")
+os.environ.setdefault("WALLET_URL_SIGNING_SECRET", "test-wallet-secret")
+os.environ.setdefault("INTERNAL_TICKET_API_TOKEN", "test-internal-token")
+os.environ.setdefault("INTERNAL_ANALYTICS_API_TOKEN", "test-analytics-token")
+os.environ.setdefault("JARVIS_QUEUE_API_TOKEN", "test-jarvis-token")
+os.environ.setdefault("ADMIN_API_KEY", "test-master-admin-key-secret")
+os.environ.setdefault("REVENUECAT_WEBHOOK_AUTH_KEY", "test-revenuecat-key")
+os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-telegram-bot-token")
+os.environ.setdefault("TELEGRAM_SECRET_TOKEN", "test-telegram-secret-token")
+os.environ.setdefault("ADMIN_TELEGRAM_CHAT_ID", "987654321")
+os.environ.setdefault("BUFFER_SANDBOX_MODE", "true")
+os.environ.setdefault("MONGO_URL", "mongodb://localhost:27017")
+os.environ.setdefault("DB_NAME", "test_database")
 
 from conftest import client  # noqa: E402,F401
 from server import limiter
@@ -51,7 +51,7 @@ from services.telegram_bot_service import (
 
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
 DB_NAME = os.environ.get("DB_NAME", "test_database")
-TG_SECRET_HEADERS = {"X-Telegram-Bot-Api-Secret-Token": "test-telegram-secret-token"}
+TG_SECRET_HEADERS = {"X-Telegram-Bot-Api-Secret-Token": os.environ.get("TELEGRAM_SECRET_TOKEN", "test-telegram-secret-token")}
 ADMIN_CHAT_ID = "987654321"
 
 

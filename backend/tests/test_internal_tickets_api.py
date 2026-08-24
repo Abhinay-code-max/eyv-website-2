@@ -529,3 +529,13 @@ def test_wrong_token_requests_are_rate_limited_too(client):
         f"expected only 401 (auth rejected) or 429 (rate limited) responses "
         f"for wrong-token requests, got: {sorted(set(statuses))}"
     )
+
+
+def test_get_ticket_stats(client):
+    r = client.get("/api/internal/tickets/stats", headers=AUTH_HEADERS)
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert "total" in data
+    assert "open" in data
+    assert "resolved" in data
+

@@ -14,6 +14,7 @@ import { Toaster } from './components/ui/sonner';
 ───────────────────────────────────────────────────────────────── */
 const HomePage         = lazy(() => import('./pages/HomePage'));
 const LoginPage        = lazy(() => import('./pages/LoginPage'));
+const SignupPage       = lazy(() => import('./pages/SignupPage'));
 const DashboardPage    = lazy(() => import('./pages/DashboardPage'));
 const TripPlannerPage  = lazy(() => import('./pages/TripPlannerPage'));
 const TripResultsPage  = lazy(() => import('./pages/TripResultsPage'));
@@ -24,6 +25,9 @@ const PremiumPage      = lazy(() => import('./pages/PremiumPage'));
 const PaymentSuccessPage = lazy(() => import('./pages/PaymentSuccessPage'));
 const PaymentCancelPage  = lazy(() => import('./pages/PaymentCancelPage'));
 const AdminDashboardPage = lazy(() => import('./pages/AdminDashboardPage'));
+const PrivacyPolicyPage  = lazy(() => import('./pages/PrivacyPolicyPage'));
+const TermsOfServicePage = lazy(() => import('./pages/TermsOfServicePage'));
+const RefundPolicyPage   = lazy(() => import('./pages/RefundPolicyPage'));
 
 
 /* ── Minimal inline fallback shown during chunk download ─────────
@@ -51,6 +55,23 @@ function AppRouter() {
     return () => clearTimeout(timer);
   }, []);
 
+  // Cross-domain PostHog identity stitching: if user navigated from the SEO site
+  // with an inbound ph_distinct_id query param, alias that anonymous distinct ID
+  // to this frontend session so the full funnel connects.
+  useEffect(() => {
+    if (typeof window !== 'undefined' && window.posthog) {
+      const params = new URLSearchParams(window.location.search);
+      const phDistinctId = params.get('ph_distinct_id');
+      if (phDistinctId) {
+        try {
+          window.posthog.alias?.(phDistinctId);
+        } catch (e) {
+          console.error('PostHog cross-domain alias error:', e);
+        }
+      }
+    }
+  }, []);
+
   // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
   if (location.hash?.includes('session_id=')) {
     return <AuthCallback />;
@@ -72,6 +93,7 @@ function AppRouter() {
         <Routes>
           <Route path="/" element={<HomePage />} />
           <Route path="/login" element={<LoginPage />} />
+          <Route path="/signup" element={<SignupPage />} />
           <Route
             path="/dashboard"
             element={<ProtectedRoute><DashboardPage /></ProtectedRoute>}
@@ -106,6 +128,9 @@ function AppRouter() {
           />
           <Route path="/payment-cancel" element={<PaymentCancelPage />} />
           <Route path="/admin" element={<AdminDashboardPage />} />
+          <Route path="/privacy" element={<PrivacyPolicyPage />} />
+          <Route path="/terms" element={<TermsOfServicePage />} />
+          <Route path="/refund-policy" element={<RefundPolicyPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
 

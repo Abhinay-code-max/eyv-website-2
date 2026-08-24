@@ -123,6 +123,7 @@ python -m uvicorn server:app --reload --port 8001
 without its key rather than crashing the whole process, so you can run the
 app locally with only a subset of real credentials configured. See
 `backend/.env.example` for the full list and what each one gates.
+For testing Stripe payments and webhooks locally via Stripe CLI, see [Local Stripe webhook testing](#local-stripe-webhook-testing).
 
 ### Frontend
 
@@ -257,32 +258,15 @@ the `STRIPE_WEBHOOK_SECRET` the backend has loaded doesn't match the one
 
 Being direct about the current state rather than overselling it:
 
-- A handful of tests in the older live-server integration suite
-  (`backend-tests`) are known-failing and tracked, not silently ignored —
-  two reference a Gemini client attribute that moved during a lazy-init
-  refactor, one uses a cached-anchor test fixture that predates a later
-  pricing field, and a few live-endpoint tests are sensitive to real rate
-  limits when the full suite runs back-to-back. None of these are gating
-  CI (`backend-tests` runs a curated, stable subset); they're on the list
-  to actually fix, not a hidden asterisk.
-- `rewards_service.redeem_points` has the same class of race the payment
-  webhook/poll path used to have (read-balance-then-write, not atomic) —
-  unlike the webhook/poll case, this one hasn't been fixed yet.
+- `rewards_service.redeem_points` balance decrement (`user_rewards`) and
+  audit row insertion (`rewards_transactions`) are two separate operations
+  rather than a single multi-document transaction. A crash between the
+  decrement and the audit write leaves the balance correctly decremented but
+  without an audit log row for that redemption. Multi-document transactions
+  would require MongoDB replica set deployment or an outbox/reconciliation pattern.
 - The Docker Compose backend image doesn't hot-reload (see above) — fine
   for "spin up a working stack," not for active backend development.
 - Train and cruise pricing are hardcoded estimate tables, not real
   provider quotes — there's no accessible real-time inventory API for
   either, and this is surfaced honestly to the user in the UI
   (`*_placeholder_pricing` flags), not hidden.
-- Itinerary generation and hotel-search pricing disagree on how many
-  nights a `departure_date`/`return_date` range covers. `generate_single_plan`
-  treats `return_date` as its own full itinerary day and force-charges a
-  full night's accommodation on it (confirmed by
-  `test_pricing_recompute_invariant.py`/`test_cruise_pricing.py`, and by
-  live Gemini eval runs — a 3-day date gap consistently produced 4
-  itinerary days). `serpapi_hotels_service.py`/`amadeus_service.py`
-  compute nights as a plain `(check_out - check_in).days`, no `+1`. Same
-  dates, two different night counts — a generated itinerary's
-  accommodation total ends up one night pricier than what the
-  hotel-search step itself would quote for the identical stay. Not fixed
-  yet, tracked here so it doesn't get lost.

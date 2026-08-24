@@ -7,7 +7,9 @@ export const HOME = {
 
 export const AUTH = {
   loginPage: 'login-page',
+  signupPage: 'signup-page',
   googleLoginButton: 'google-login-button',
+  googleSignupButton: 'google-signup-button',
   logoutButton: 'logout-button',
   userAvatar: 'user-avatar',
 };
@@ -102,4 +104,25 @@ export const PAYMENT = {
   successPage: 'payment-success-page',
   cancelPage: 'payment-cancel-page',
   statusBadge: 'payment-status-badge',
+};
+
+export const SUPPORT = {
+  launcherButton: 'support-launcher-button',
+  panel: 'support-panel',
+  messageInput: 'support-message-input',
+  sendButton: 'support-send-button',
+  messageBubble: 'support-message-bubble',
+};
+
+export const NOTIFICATIONS = {
+  bellButton: 'notification-bell-button',
+  unreadBadge: 'notification-unread-badge',
+  list: 'notification-list',
+  item: 'notification-item',
+};
+
+export const LEGAL = {
+  privacyPage: 'privacy-policy-page',
+  termsPage: 'terms-of-service-page',
+  refundPage: 'refund-policy-page',
 };

@@ -3,6 +3,8 @@ import { Navigate, useLocation } from 'react-router-dom';
 import axios from 'axios';
 import { API_URL } from '../constants';
 import LoadingAnimation from '../components/LoadingAnimation';
+import SupportWidget from './SupportWidget';
+import NotificationBell from './NotificationBell';
 
 const ProtectedRoute = ({ children }) => {
   const location = useLocation();
@@ -37,7 +39,20 @@ const ProtectedRoute = ({ children }) => {
     return <Navigate to="/login" state={{ from: location }} replace />;
   }
 
-  return React.cloneElement(children, { user });
+  // Rendered once here, alongside every protected page, rather than
+  // duplicated into each page component - ProtectedRoute already wraps
+  // every authenticated route in App.js and already resolves `user`
+  // (the notification loop and the support widget's ticket-reporter
+  // identity both depend on user_id - see the EYV Agent System roadmap's
+  // own "authenticated users only" note), so this is the one place that
+  // naturally covers all of them without touching each page file.
+  return (
+    <>
+      {React.cloneElement(children, { user })}
+      <SupportWidget />
+      <NotificationBell />
+    </>
+  );
 };
 
 export default ProtectedRoute;

@@ -71,4 +71,12 @@ venv/
 credentials.json
 *.key
 .credentials
+.mongo_url_tmp
 frontend/node_modules/.cache/default-development/0.pack
+
+# Backup files
+*.backup
+*.backup*
+*.backup[0-9]*
+*.jsx.backup
+*.js.backup

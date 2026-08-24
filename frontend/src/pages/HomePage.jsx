@@ -7,7 +7,7 @@ import {
   useInView,
   useReducedMotion,
 } from 'framer-motion';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 import {
   Calendar, Users, Search, Plane, Hotel, Utensils, Activity,
   Star, ChevronRight, Globe, Compass, Menu, X, ArrowRight, Sparkles,
@@ -235,9 +235,17 @@ const HomePage = () => {
             <button
               data-testid={HOME.loginButton}
               onClick={() => navigate('/login')}
-              className="hidden md:inline-flex bg-[#C47245] text-white px-6 py-2.5 rounded-full text-sm font-medium transition-all hover:bg-[#A85D38] hover:shadow-lg hover:shadow-[#C47245]/30 active:scale-95"
+              className={`hidden md:inline-flex px-4 py-2 text-sm font-medium transition-colors ${
+                scrolled ? 'text-[#57534E] hover:text-[#C47245]' : 'text-white/90 hover:text-white'
+              }`}
             >
-              Sign In
+              Log In
+            </button>
+            <button
+              onClick={() => navigate('/signup')}
+              className="hidden md:inline-flex bg-[#C47245] text-white px-5 py-2 rounded-full text-sm font-medium transition-all hover:bg-[#A85D38] hover:shadow-lg hover:shadow-[#C47245]/30 active:scale-95"
+            >
+              Sign Up
             </button>
             <button aria-label="Open menu" onClick={() => setMobileOpen((v) => !v)}
               className={`md:hidden p-2 rounded-full transition-colors ${
@@ -259,10 +267,16 @@ const HomePage = () => {
                     {l.label}
                   </a>
                 ))}
-                <button onClick={() => { setMobileOpen(false); navigate('/login'); }}
-                  className="mt-3 bg-[#C47245] text-white py-3 rounded-full font-medium hover:bg-[#A85D38] transition-all">
-                  Sign In
-                </button>
+                <div className="flex flex-col gap-2 mt-3">
+                  <button onClick={() => { setMobileOpen(false); navigate('/login'); }}
+                    className="w-full border border-[#C47245] text-[#C47245] py-2.5 rounded-full font-medium hover:bg-[#C47245]/10 transition-all text-sm">
+                    Log In
+                  </button>
+                  <button onClick={() => { setMobileOpen(false); navigate('/signup'); }}
+                    className="w-full bg-[#C47245] text-white py-2.5 rounded-full font-medium hover:bg-[#A85D38] transition-all text-sm">
+                    Sign Up Free
+                  </button>
+                </div>
               </div>
             </motion.div>
           )}
@@ -536,7 +550,7 @@ const HomePage = () => {
                     </motion.div>
                   ))}
                 </div>
-                <button onClick={() => navigate('/login')}
+                <button onClick={() => navigate('/signup')}
                   className="w-full py-4 rounded-xl font-medium text-white flex items-center justify-center gap-2 transition-all hover:opacity-90 hover:shadow-lg active:scale-[0.99]"
                   style={{ background: activeTierData.ringColor }}>
                   Plan with {activeTierData.label} Budget
@@ -670,7 +684,7 @@ const HomePage = () => {
 
           <motion.div variants={fadeUp} initial="hidden" whileInView="show" viewport={{ once: true }}
             className="text-center mt-14">
-            <button onClick={() => navigate('/login')}
+            <button onClick={() => navigate('/signup')}
               className="group inline-flex items-center gap-2 bg-[#1C1917] text-white px-8 py-4 rounded-full font-medium hover:bg-[#2A4B5C] transition-all hover:shadow-xl active:scale-95">
               Start Planning Now
               <ArrowRight size={18} className="transition-transform group-hover:translate-x-1" />
@@ -715,7 +729,7 @@ const HomePage = () => {
           <p className="text-xl text-white/80 mb-10">
             Let our AI plan the perfect vacation tailored just for you
           </p>
-          <button onClick={() => navigate('/login')}
+          <button onClick={() => navigate('/signup')}
             className="group bg-[#C47245] text-white px-8 py-4 rounded-full text-lg font-medium inline-flex items-center gap-2 hover:bg-[#A85D38] transition-all hover:shadow-2xl hover:shadow-[#C47245]/40 active:scale-95">
             Get Started
             <ChevronRight size={20} className="transition-transform group-hover:translate-x-1" />
@@ -726,11 +740,11 @@ const HomePage = () => {
       {/* ── Footer ── */}
       <footer className="py-16 px-6 bg-[#FDFBF7] border-t border-[#E7E5E4]">
         <div className="max-w-7xl mx-auto">
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-10 mb-12">
-            <div className="md:col-span-1">
+          <div className="grid grid-cols-1 md:grid-cols-5 gap-10 mb-12">
+            <div className="md:col-span-2">
               <EYVLogo size="small" />
-              <p className="mt-4 text-sm text-[#57534E] leading-relaxed">
-                AI-powered travel planning, from flights to activities — all in one place.
+              <p className="mt-4 text-sm text-[#57534E] leading-relaxed max-w-sm">
+                AI-powered travel planning, from flights and hotels to curated multi-day activities — all in one place.
               </p>
             </div>
             <div>
@@ -742,23 +756,28 @@ const HomePage = () => {
               </ul>
             </div>
             <div>
-              <h4 className="text-xs uppercase tracking-[0.18em] text-[#1C1917] font-semibold mb-4">Company</h4>
+              <h4 className="text-xs uppercase tracking-[0.18em] text-[#1C1917] font-semibold mb-4">Legal</h4>
               <ul className="space-y-3 text-sm text-[#57534E]">
-                <li>Careers</li>
-                <li>Press</li>
-                <li>Contact</li>
+                <li><Link to="/privacy" className="hover:text-[#C47245] transition-colors">Privacy Policy</Link></li>
+                <li><Link to="/terms" className="hover:text-[#C47245] transition-colors">Terms of Service</Link></li>
+                <li><Link to="/refund-policy" className="hover:text-[#C47245] transition-colors">Refund Policy</Link></li>
               </ul>
             </div>
             <div>
               <h4 className="text-xs uppercase tracking-[0.18em] text-[#1C1917] font-semibold mb-4">Get Started</h4>
-              <button onClick={() => navigate('/login')}
+              <button onClick={() => navigate('/signup')}
                 className="bg-[#C47245] text-white px-6 py-2.5 rounded-full text-sm font-medium hover:bg-[#A85D38] transition-all hover:shadow-lg">
                 Plan a Trip
               </button>
             </div>
           </div>
-          <div className="pt-8 border-t border-[#E7E5E4] text-center">
+          <div className="pt-8 border-t border-[#E7E5E4] flex flex-col md:flex-row items-center justify-between gap-4 text-center md:text-left">
             <p className="text-sm text-[#57534E]">© 2026 EYV. Enjoy Your Vacation — We Plan Everything.</p>
+            <div className="flex items-center gap-6 text-xs text-[#57534E]">
+              <Link to="/privacy" className="hover:text-[#C47245] transition-colors">Privacy</Link>
+              <Link to="/terms" className="hover:text-[#C47245] transition-colors">Terms</Link>
+              <Link to="/refund-policy" className="hover:text-[#C47245] transition-colors">Refund Policy</Link>
+            </div>
           </div>
         </div>
       </footer>

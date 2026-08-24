@@ -7,6 +7,9 @@ import logging
 from typing import Optional
 from datetime import datetime, timezone
 
+from pymongo import ReturnDocument
+from pymongo.errors import DuplicateKeyError
+
 from . import ignav_service
 from . import booking_expiry_service
 
@@ -106,6 +109,9 @@ async def redeem_points(db, user_id: str, points: int, reference_id: Optional[st
     pattern as reserve_points below and the payment-status race fix in
     server.py's stripe_webhook/get_payment_status (find_one_and_update
     filtered on current state instead of read-then-write)."""
+    if points <= 0:
+        raise ValueError("Points to redeem must be greater than 0")
+
     await get_or_create_rewards(db, user_id)
 
     result = await db.user_rewards.update_one(
@@ -132,6 +138,12 @@ async def redeem_points(db, user_id: str, points: int, reference_id: Optional[st
         'created_at': datetime.now(timezone.utc),
     }
 
+    # Known gap: Balance decrement (user_rewards) and audit-log insert
+    # (rewards_transactions) are not executed atomically across collections.
+    # If the process crashes between update_one and this insert_one, the user's
+    # balance is decremented correctly but the audit log will be missing the
+    # redemption record. Multi-document transactions require MongoDB replica
+    # sets or an outbox/reconciliation pattern.
     await db.rewards_transactions.insert_one(transaction)
 
     return {'points_redeemed': points, 'discount_usd': discount_usd}
@@ -268,18 +280,39 @@ async def refund_stale_reserved_points(db) -> int:
 
 
 async def get_or_create_rewards(db, user_id: str) -> dict:
-    """Get or create user rewards record."""
+    """Get or create user rewards record atomically using find_one_and_update
+    with upsert=True and DuplicateKeyError fallback, preventing duplicate document
+    creation and ensuring concurrent first-time callers converge cleanly."""
+    try:
+        now = datetime.now(timezone.utc)
+        rewards = await db.user_rewards.find_one_and_update(
+            {'user_id': user_id},
+            {
+                '$setOnInsert': {
+                    'user_id': user_id,
+                    'available_points': 0,
+                    'lifetime_points': 0,
+                    'created_at': now,
+                    'updated_at': now,
+                }
+            },
+            upsert=True,
+            projection={'_id': 0},
+            return_document=ReturnDocument.AFTER,
+        )
+        if rewards:
+            return rewards
+    except DuplicateKeyError:
+        pass
+
     rewards = await db.user_rewards.find_one({'user_id': user_id}, {'_id': 0})
-    if not rewards:
-        rewards = {
-            'user_id': user_id,
-            'available_points': 0,
-            'lifetime_points': 0,
-            'created_at': datetime.now(timezone.utc),
-            'updated_at': datetime.now(timezone.utc),
-        }
-        await db.user_rewards.insert_one(dict(rewards))
-    return rewards
+    if rewards:
+        return rewards
+    return {
+        'user_id': user_id,
+        'available_points': 0,
+        'lifetime_points': 0,
+    }
 
 
 async def get_user_rewards_summary(db, user_id: str) -> dict:

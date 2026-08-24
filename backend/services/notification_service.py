@@ -207,6 +207,29 @@ async def count_unread_notifications(db, user_id: str) -> int:
     return await db.notifications.count_documents({"user_id": user_id, "read": False})
 
 
+async def mark_notifications_read(db, user_id: str) -> int:
+    """Marks every currently-unread notification belonging to `user_id` as
+    read in one call - added in Step 4.4 for "opening/viewing the list
+    marks them read," not a per-notification click-to-dismiss interaction.
+    Scoped to `user_id` in the query itself (not just filtered after the
+    fact), so this can never touch another user's notifications regardless
+    of what the caller passes.
+
+    NotificationDoc.read is a plain bool with no read_at timestamp (see
+    that model in db_models.py) - confirmed against the existing Step 4.3
+    shape before writing this, since a timestamp would need adding here if
+    it didn't already cover what's needed; a bool is sufficient for the
+    unread-count/mark-read mechanics this exposes, so none was added.
+    Returns the number of notifications actually flipped from unread to
+    read (0 if the user had none pending - safe/idempotent to call on an
+    already-all-read state)."""
+    result = await db.notifications.update_many(
+        {"user_id": user_id, "read": False},
+        {"$set": {"read": True}},
+    )
+    return result.modified_count
+
+
 # ── Fan-out ──────────────────────────────────────────────────────────────
 
 async def _lookup_user_email(db, user_id: str) -> Optional[str]:

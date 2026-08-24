@@ -1,0 +1,1065 @@
+[
+  {
+    "name": "Mumbai",
+    "slug": "mumbai",
+    "description": "Mumbai is India's largest city and financial capital, a dense, energetic metropolis on the Arabian Sea known for Bollywood, colonial-era architecture, and a thriving street-food culture. It blends historic landmarks like the Gateway of India with modern skyscrapers and one of the world's busiest waterfronts.",
+    "highlights": [
+      "Gateway of India and the nearby Colaba waterfront",
+      "Elephanta Caves (boat trip from Mumbai harbour)",
+      "Marine Drive promenade at sunset",
+      "Chhatrapati Shivaji Maharaj Terminus (UNESCO World Heritage railway station)",
+      "Street food tour in Mohammed Ali Road / Bhendi Bazaar"
+    ],
+    "best_time_to_visit": "November to February, when the weather is cooler and dry (monsoon runs roughly June-September).",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current ferry schedule/ticket prices for Elephanta Caves",
+      "Any current entry fee for Elephanta Caves (UNESCO site)"
+    ]
+  },
+  {
+    "name": "Delhi",
+    "slug": "delhi",
+    "description": "Delhi, India's capital, layers Mughal-era monuments, British colonial architecture, and a fast-growing modern city across Old and New Delhi. It's home to multiple UNESCO World Heritage Sites within a compact area.",
+    "highlights": [
+      "Red Fort and Chandni Chowk in Old Delhi",
+      "Humayun's Tomb",
+      "Qutub Minar",
+      "India Gate and the government buildings of New Delhi",
+      "Jama Masjid"
+    ],
+    "best_time_to_visit": "October to March, avoiding the intense summer heat and monsoon humidity.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current entry fees/timings for Red Fort, Humayun's Tomb, and Qutub Minar",
+      "Current air-quality advisories for winter months (Delhi's AQI spikes Nov-Jan)"
+    ]
+  },
+  {
+    "name": "Bangalore",
+    "slug": "bangalore",
+    "description": "Bangalore is India's tech capital, known for a mild climate, a thriving startup and IT scene, and a mix of colonial-era gardens with a booming pub and restaurant culture. It's a common gateway to South India's hill stations.",
+    "highlights": [
+      "Lalbagh Botanical Garden",
+      "Bangalore Palace",
+      "Cubbon Park",
+      "MG Road and Brigade Road shopping/dining district",
+      "Nandi Hills day trip"
+    ],
+    "best_time_to_visit": "Bangalore has a pleasant climate year-round; October to February is coolest and driest.",
+    "content_reviewed": true,
+    "needs_verification": []
+  },
+  {
+    "name": "Goa",
+    "slug": "goa",
+    "description": "Goa is India's smallest state, a former Portuguese colony on the west coast famous for its beaches, laid-back nightlife, and a distinct Indo-Portuguese culture visible in its churches and architecture.",
+    "highlights": [
+      "North Goa beaches (Baga, Calangute, Anjuna)",
+      "South Goa's quieter beaches (Palolem, Agonda)",
+      "Basilica of Bom Jesus and Se Cathedral in Old Goa",
+      "Saturday Night Market at Arpora",
+      "Spice plantation tours"
+    ],
+    "best_time_to_visit": "November to February, the cool, dry peak season (monsoon runs June-September and many beach shacks close).",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Which specific beach shacks/clubs are currently operating each season, since these open/close annually"
+    ]
+  },
+  {
+    "name": "Palolem Beach, Goa",
+    "slug": "palolem-beach-goa",
+    "description": "Palolem is a crescent-shaped, palm-lined beach in South Goa known for a calmer, more laid-back atmosphere than the busier beaches of North Goa, with beach huts and kayak/dolphin-watching trips.",
+    "highlights": [
+      "Sunset kayaking or dolphin-spotting boat trips",
+      "Beach hut stays directly on the sand",
+      "Silent Noise silent disco parties",
+      "Butterfly Beach hike/boat trip nearby"
+    ],
+    "best_time_to_visit": "November to April/early May, the peak season when beach huts and silent-disco events are open; nearly all close for the June-September monsoon.",
+    "content_reviewed": true,
+    "needs_verification": []
+  },
+  {
+    "name": "Baga Beach, Goa",
+    "slug": "baga-beach-goa",
+    "description": "Baga is one of North Goa's busiest and most popular beaches, known for its nightlife, water sports, and beachside shacks and clubs.",
+    "highlights": [
+      "Water sports (parasailing, jet-skiing, banana boat rides)",
+      "Nightlife at Tito's Lane",
+      "Baga night market",
+      "Beachside seafood shacks"
+    ],
+    "best_time_to_visit": "November to February, peak tourist season.",
+    "content_reviewed": true,
+    "needs_verification": []
+  },
+  {
+    "name": "Jaipur",
+    "slug": "jaipur",
+    "description": "Jaipur, the \"Pink City,\" is Rajasthan's capital, famous for its rose-hued old town, Mughal-Rajput palaces and forts, and its role as a gateway to Rajasthan's desert circuit.",
+    "highlights": [
+      "City Palace complex",
+      "Jantar Mantar (UNESCO-listed astronomical observatory)",
+      "Nahargarh Fort viewpoint",
+      "Johari Bazaar for jewellery and textiles",
+      "Chokhi Dhani cultural village"
+    ],
+    "best_time_to_visit": "October to March, avoiding Rajasthan's very hot summers.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current entry fees for City Palace, Jantar Mantar, and Nahargarh Fort"
+    ]
+  },
+  {
+    "name": "Hawa Mahal, Jaipur",
+    "slug": "hawa-mahal-jaipur",
+    "description": "The Hawa Mahal (\"Palace of Winds\") is a distinctive five-story pink sandstone facade in Jaipur, built in 1799 with hundreds of small latticed windows originally designed to let royal women observe street life unseen.",
+    "highlights": [
+      "Photographing the honeycomb facade from the street at sunrise",
+      "Climbing inside for views over Jaipur's old city",
+      "Combining with a City Palace/Jantar Mantar visit (all close together)"
+    ],
+    "best_time_to_visit": "Early morning for the best light on the facade and fewer crowds; open daily roughly 9am-5pm, October to March overall.",
+    "content_reviewed": false,
+    "needs_verification": [
+      "Current entry fee - sources disagree significantly (roughly Rs.50/Rs.200 vs Rs.100/Rs.600 Indian/foreign depending on source) and no official current figure could be confirmed"
+    ]
+  },
+  {
+    "name": "Amer Fort, Jaipur",
+    "slug": "amer-fort-jaipur",
+    "description": "Amer Fort (Amber Fort) is a large hilltop fort-palace complex just outside Jaipur, built from pale yellow and pink sandstone, known for its elaborate mirror work in the Sheesh Mahal and views over Maota Lake.",
+    "highlights": [
+      "Sheesh Mahal (Mirror Palace)",
+      "Jeep ride up to the fort entrance (elephant rides are also offered, but are the subject of an active, ongoing animal-welfare controversy - jeep is the straightforward choice)",
+      "Amer Fort's evening light-and-sound show (around Rs.295, ~50 minutes, in Hindi and English; showtime shifts with the season)",
+      "Panoramic views over Maota Lake"
+    ],
+    "best_time_to_visit": "October to March; early morning to avoid heat and crowds.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current elephant-ride availability/ethical status - an active, evolving animal-welfare controversy (a 2026 protest campaign and a reported elephant death were both in the news); confirm current status before recommending",
+      "Exact current light-and-sound show showtime for the visit date (shifts seasonally) and exact ticket price"
+    ]
+  },
+  {
+    "name": "Agra",
+    "slug": "agra",
+    "description": "Agra, on the banks of the Yamuna river, was a Mughal capital and is home to some of India's most famous monuments, most notably the Taj Mahal, alongside Agra Fort and other Mughal-era sites.",
+    "highlights": [
+      "Taj Mahal at sunrise",
+      "Agra Fort (UNESCO site)",
+      "Itimad-ud-Daulah ('Baby Taj')",
+      "Mehtab Bagh for a Taj Mahal river view",
+      "Fatehpur Sikri day trip"
+    ],
+    "best_time_to_visit": "October to March, avoiding extreme summer heat.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current Taj Mahal ticket prices and any special night-viewing schedule"
+    ]
+  },
+  {
+    "name": "Taj Mahal, Agra",
+    "slug": "taj-mahal-agra",
+    "description": "The Taj Mahal is a white marble mausoleum built by Mughal emperor Shah Jahan in memory of his wife Mumtaz Mahal, completed in the mid-17th century, and is one of the most recognized UNESCO World Heritage Sites in the world.",
+    "highlights": [
+      "Sunrise viewing for softer light and smaller crowds",
+      "The inlaid marble (pietra dura) detailing up close",
+      "Photographing from across the Yamuna at Mehtab Bagh",
+      "The surrounding charbagh (Mughal garden) layout",
+      "Closed every Friday - entry that day is restricted to those attending prayers at the on-site mosque"
+    ],
+    "best_time_to_visit": "October to March; early morning entry is generally recommended.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current entry fee amounts (separate tiers for Indian/SAARC-BIMSTEC/foreign visitors, plus an additional mausoleum-entry fee) - confirm current rates before publishing, since fees are revised periodically",
+      "Whether a timed-entry slot system or visitor number cap is currently in effect - could not confirm current specifics"
+    ]
+  },
+  {
+    "name": "Udaipur",
+    "slug": "udaipur",
+    "description": "Udaipur, the \"City of Lakes,\" is a Rajasthan city built around artificial lakes and known for its palaces, many of which sit on or beside the water, giving it a romantic reputation.",
+    "highlights": [
+      "City Palace complex",
+      "Lake Pichola boat ride past the Lake Palace",
+      "Jagdish Temple",
+      "Saheliyon ki Bari (Garden of the Maidens)",
+      "Sunset at Ambrai Ghat"
+    ],
+    "best_time_to_visit": "September to March, when lake levels and weather are most pleasant.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current City Palace entry fees and boat ride pricing"
+    ]
+  },
+  {
+    "name": "Jodhpur",
+    "slug": "jodhpur",
+    "description": "Jodhpur, the \"Blue City,\" is known for the indigo-washed houses of its old town clustered beneath the imposing Mehrangarh Fort on a rocky ridge.",
+    "highlights": [
+      "Mehrangarh Fort and its museum",
+      "Blue-painted old city lanes",
+      "Jaswant Thada (marble memorial)",
+      "Sardar Market and clock tower"
+    ],
+    "best_time_to_visit": "October to March, avoiding the desert heat of summer.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current Mehrangarh Fort entry fees and audio-guide availability"
+    ]
+  },
+  {
+    "name": "Jaisalmer",
+    "slug": "jaisalmer",
+    "description": "Jaisalmer is a desert city in far-western Rajasthan built around a sandstone fort that still houses a living old town, and is a common base for camel safaris into the Thar Desert.",
+    "highlights": [
+      "Jaisalmer Fort (a living fort with shops, homes, and temples inside)",
+      "Patwon ki Haveli and other carved havelis",
+      "Camel safari and overnight desert camping at Sam Sand Dunes",
+      "Gadisar Lake"
+    ],
+    "best_time_to_visit": "October to February; summer temperatures in the Thar Desert are extreme.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current camel safari operators and pricing, since these vary by season and operator"
+    ]
+  },
+  {
+    "name": "Manali",
+    "slug": "manali",
+    "description": "Manali is a Himalayan hill town in Himachal Pradesh, popular for mountain scenery, adventure sports, and as a gateway to high-altitude passes like Rohtang and the Leh-Manali highway.",
+    "highlights": [
+      "Solang Valley for adventure sports/skiing",
+      "Rohtang Pass day trip",
+      "Old Manali's cafes and Hadimba Temple",
+      "Beas River rafting"
+    ],
+    "best_time_to_visit": "March to June and September to November; roads to high passes are typically snowbound in deep winter.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current Rohtang Pass permit requirements and seasonal road-opening dates, which change yearly"
+    ]
+  },
+  {
+    "name": "Shimla",
+    "slug": "shimla",
+    "description": "Shimla, the former summer capital of British India, is a Himalayan hill station known for colonial-era architecture, pine forests, and the pedestrian Mall Road at its centre.",
+    "highlights": [
+      "The Ridge and Mall Road",
+      "Kalka-Shimla toy train (UNESCO World Heritage railway)",
+      "Jakhu Temple and hilltop Hanuman statue",
+      "Christ Church"
+    ],
+    "best_time_to_visit": "March to June for pleasant weather, or December to February for snow.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current Kalka-Shimla toy train schedule and ticket prices"
+    ]
+  },
+  {
+    "name": "Dharamshala",
+    "slug": "dharamshala",
+    "description": "Dharamshala is a Himachal Pradesh hill town best known as the seat of the Tibetan government-in-exile and the residence of the Dalai Lama, set against snow-capped Dhauladhar mountain views.",
+    "highlights": [
+      "Namgyal Monastery and the Dalai Lama's temple complex",
+      "Triund trek (day hike with Himalayan views)",
+      "Tibetan Museum",
+      "Bhagsu Waterfall"
+    ],
+    "best_time_to_visit": "March to June and September to November; monsoon (July-August) brings heavy rain.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current public access rules/schedule for Dalai Lama teachings or temple visits, which vary"
+    ]
+  },
+  {
+    "name": "Mcleodganj",
+    "slug": "mcleodganj",
+    "description": "McLeod Ganj is the upper part of Dharamshala, a small town with a large Tibetan exile community, monasteries, and cafes, often used as a base for the Triund trek.",
+    "highlights": [
+      "Tsuglagkhang Complex (Dalai Lama's temple)",
+      "Bhagsu Nag Temple and waterfall",
+      "Triund trek trailhead",
+      "Tibetan handicraft and momo (dumpling) shops"
+    ],
+    "best_time_to_visit": "March to June and September to November.",
+    "content_reviewed": true,
+    "needs_verification": []
+  },
+  {
+    "name": "Leh, Ladakh",
+    "slug": "leh-ladakh",
+    "description": "Leh is the main town of Ladakh, a high-altitude desert region in the Himalayas known for Buddhist monasteries, dramatic mountain-and-lake landscapes, and some of the highest motorable passes in the world.",
+    "highlights": [
+      "Pangong Lake day trip",
+      "Thiksey and Hemis monasteries",
+      "Khardung La (high mountain pass)",
+      "Leh Palace",
+      "Nubra Valley and its sand dunes"
+    ],
+    "best_time_to_visit": "May to September, when high-altitude roads are open; the region is snowbound and largely inaccessible by road in winter.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current Inner Line Permit requirements for foreign and domestic tourists visiting Pangong Lake, Nubra Valley, and other restricted areas - these rules change",
+      "Altitude-acclimatization advisories, since Leh sits above 3,500m"
+    ]
+  },
+  {
+    "name": "Srinagar",
+    "slug": "srinagar",
+    "description": "Srinagar, the summer capital of Jammu & Kashmir, is built around Dal Lake and is known for houseboats, Mughal gardens, and Himalayan scenery.",
+    "highlights": [
+      "Houseboat stay on Dal Lake",
+      "Shikara (boat) ride through the lake and floating gardens",
+      "Mughal Gardens (Shalimar Bagh, Nishat Bagh)",
+      "Old Srinagar's Jama Masjid and shrines"
+    ],
+    "best_time_to_visit": "April to October; winters are cold with occasional snow.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current government travel advisories for Jammu & Kashmir, as regional security/travel guidance changes"
+    ]
+  },
+  {
+    "name": "Rishikesh",
+    "slug": "rishikesh",
+    "description": "Rishikesh, on the banks of the Ganges in Uttarakhand, is known as a centre for yoga and meditation, and has become a popular base for river rafting and other Himalayan adventure activities.",
+    "highlights": [
+      "Ganga Aarti ceremony at Triveni Ghat or Parmarth Niketan",
+      "Laxman Jhula and Ram Jhula suspension bridges",
+      "White-water rafting on the Ganges",
+      "Yoga/meditation retreats and ashrams"
+    ],
+    "best_time_to_visit": "September to April; rafting season typically runs September/October to June, pausing during peak monsoon.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current rafting-season dates and permit rules, which are set annually by local authorities"
+    ]
+  },
+  {
+    "name": "Haridwar",
+    "slug": "haridwar",
+    "description": "Haridwar is one of Hinduism's seven holiest cities, sitting where the Ganges leaves the Himalayan foothills, and is best known for its evening Ganga Aarti and as a periodic host of the Kumbh Mela.",
+    "highlights": [
+      "Ganga Aarti at Har Ki Pauri",
+      "Mansa Devi Temple (reachable by cable car)",
+      "Chandi Devi Temple",
+      "Old town bazaars"
+    ],
+    "best_time_to_visit": "October to March; check dates if visiting for a specific festival.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Kumbh Mela/Ardh Kumbh Mela specific dates, which follow an astrological cycle and should be confirmed rather than assumed"
+    ]
+  },
+  {
+    "name": "Varanasi",
+    "slug": "varanasi",
+    "description": "Varanasi, on the banks of the Ganges, is one of the world's oldest continuously inhabited cities and a major pilgrimage site for Hindus, known for its ghats and cremation rituals performed in public view.",
+    "highlights": [
+      "Sunrise boat ride along the ghats",
+      "Ganga Aarti ceremony at Dashashwamedh Ghat",
+      "Kashi Vishwanath Temple",
+      "Sarnath (Buddhist site, short trip from Varanasi)"
+    ],
+    "best_time_to_visit": "October to March, avoiding summer heat and monsoon humidity.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current Kashi Vishwanath Temple entry procedures/security rules, which have changed since redevelopment of the temple corridor"
+    ]
+  },
+  {
+    "name": "Kerala",
+    "slug": "kerala",
+    "description": "Kerala, on India's tropical southwest coast, is known for its backwaters, houseboats, tea and spice plantations, and Ayurvedic wellness tourism, often marketed as \"God's Own Country.\"",
+    "highlights": [
+      "Backwater houseboat cruise in Alleppey/Kumarakom",
+      "Munnar's tea plantations",
+      "Periyar Wildlife Sanctuary",
+      "Kathakali dance performance",
+      "Fort Kochi's colonial architecture"
+    ],
+    "best_time_to_visit": "September to March, avoiding the monsoon (June-August), though monsoon season is itself popular for Ayurvedic treatments.",
+    "content_reviewed": true,
+    "needs_verification": []
+  },
+  {
+    "name": "Munnar, Kerala",
+    "slug": "munnar-kerala",
+    "description": "Munnar is a hill station in Kerala's Western Ghats known for its rolling tea plantations, cool climate, and the endangered Nilgiri tahr found in nearby Eravikulam National Park.",
+    "highlights": [
+      "Tea plantation tours and the Tea Museum",
+      "Eravikulam National Park",
+      "Mattupetty Dam and boating",
+      "Top Station viewpoint"
+    ],
+    "best_time_to_visit": "September to May, cool year-round due to elevation.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Neelakurinji flower bloom timing - this shrub flowers only once every 12 years and specific expected bloom years should be confirmed rather than assumed"
+    ]
+  },
+  {
+    "name": "Alleppey, Kerala",
+    "slug": "alleppey-kerala",
+    "description": "Alleppey (Alappuzha), often called the \"Venice of the East,\" is the hub of Kerala's backwaters, known for houseboat cruises through a network of canals, lagoons, and lakes.",
+    "highlights": [
+      "Overnight houseboat cruise",
+      "Alleppey Beach",
+      "Snake boat races (Nehru Trophy Boat Race)",
+      "Kuttanad's paddy fields below sea level"
+    ],
+    "best_time_to_visit": "November to February for cool weather; the Nehru Trophy Boat Race is held annually in August.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Exact date of the Nehru Trophy Boat Race, which is set annually (traditionally second Saturday of August, but confirm)"
+    ]
+  },
+  {
+    "name": "Kochi, Kerala",
+    "slug": "kochi-kerala",
+    "description": "Kochi (Cochin) is a historic port city on Kerala's coast that blends Portuguese, Dutch, and British colonial influences with local culture, seen in Fort Kochi's architecture and the iconic Chinese fishing nets.",
+    "highlights": [
+      "Chinese fishing nets at Fort Kochi",
+      "Mattancherry Palace and Jew Town/Paradesi Synagogue",
+      "Kathakali/Kalaripayattu performances",
+      "St. Francis Church"
+    ],
+    "best_time_to_visit": "October to March, avoiding monsoon season.",
+    "content_reviewed": true,
+    "needs_verification": []
+  },
+  {
+    "name": "Ooty",
+    "slug": "ooty",
+    "description": "Ooty (Udhagamandalam) is a Tamil Nadu hill station in the Nilgiri Hills, a former British summer retreat known for tea gardens, a toy train, and cool weather.",
+    "highlights": [
+      "Nilgiri Mountain Railway (UNESCO World Heritage toy train)",
+      "Ooty Botanical Garden",
+      "Doddabetta Peak viewpoint",
+      "Ooty Lake boating"
+    ],
+    "best_time_to_visit": "April to June and September to November; can get cold December-February.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current Nilgiri Mountain Railway schedule and ticket booking process"
+    ]
+  },
+  {
+    "name": "Coorg",
+    "slug": "coorg",
+    "description": "Coorg (Kodagu) is a hilly district in Karnataka known as the \"Scotland of India,\" famous for coffee plantations, spice estates, and misty Western Ghats scenery.",
+    "highlights": [
+      "Coffee plantation tours and tastings",
+      "Abbey Falls",
+      "Dubare Elephant Camp",
+      "Raja's Seat viewpoint",
+      "Namdroling Monastery (Golden Temple)"
+    ],
+    "best_time_to_visit": "October to March, dry and cool; monsoon (June-September) is scenic but very wet.",
+    "content_reviewed": true,
+    "needs_verification": []
+  },
+  {
+    "name": "Mysore",
+    "slug": "mysore",
+    "description": "Mysore (Mysuru) is a Karnataka city known for its opulent Mysore Palace and its lavish Dasara festival celebrations, alongside a legacy as a former princely-state capital.",
+    "highlights": [
+      "Mysore Palace, especially illuminated at night",
+      "Chamundi Hill and temple",
+      "Devaraja Market",
+      "Mysore Zoo"
+    ],
+    "best_time_to_visit": "October (for Dasara festival) or generally October to February for cooler weather.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Exact Dasara festival dates for a given year, since it follows the Hindu lunar calendar"
+    ]
+  },
+  {
+    "name": "Chennai",
+    "slug": "chennai",
+    "description": "Chennai, the capital of Tamil Nadu, is a major South Indian cultural and economic hub on the Bay of Bengal, known for Dravidian temple architecture, classical dance, and one of India's longest urban beaches.",
+    "highlights": [
+      "Marina Beach",
+      "Kapaleeshwarar Temple",
+      "Fort St. George",
+      "Mahabalipuram day trip (UNESCO rock-cut temples)"
+    ],
+    "best_time_to_visit": "November to February, avoiding intense heat and humidity.",
+    "content_reviewed": true,
+    "needs_verification": []
+  },
+  {
+    "name": "Pondicherry",
+    "slug": "pondicherry",
+    "description": "Pondicherry (Puducherry) is a former French colonial territory on India's southeast coast, known for its French Quarter's colourful colonial buildings, seaside promenade, and the Auroville experimental community nearby.",
+    "highlights": [
+      "French Quarter (White Town) walking tour",
+      "Promenade Beach",
+      "Auroville and the Matrimandir",
+      "Sri Aurobindo Ashram"
+    ],
+    "best_time_to_visit": "October to March, avoiding summer heat and monsoon.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current visitor access rules for the Matrimandir at Auroville, which requires advance viewing passes"
+    ]
+  },
+  {
+    "name": "Hyderabad",
+    "slug": "hyderabad",
+    "description": "Hyderabad is the capital of Telangana, a city that blends Deccani and Mughal-influenced heritage (from the Qutb Shahi and Nizam eras) with a major modern IT industry, and is famous for its biryani.",
+    "highlights": [
+      "Charminar and the surrounding Laad Bazaar",
+      "Golconda Fort",
+      "Chowmahalla Palace",
+      "Ramoji Film City",
+      "Hussain Sagar lake and Buddha statue"
+    ],
+    "best_time_to_visit": "October to February, avoiding the hot summer months.",
+    "content_reviewed": true,
+    "needs_verification": []
+  },
+  {
+    "name": "Kolkata",
+    "slug": "kolkata",
+    "description": "Kolkata (Calcutta), the capital of West Bengal and former capital of British India, is known for its colonial-era architecture, literary and artistic heritage, and a strong cultural identity centred on the Bengali arts.",
+    "highlights": [
+      "Victoria Memorial",
+      "Howrah Bridge and the riverside ghats",
+      "College Street book market",
+      "Indian Museum",
+      "Dakshineswar Kali Temple"
+    ],
+    "best_time_to_visit": "October to March, avoiding summer heat and monsoon humidity; Durga Puja (September/October) is a major cultural event.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Exact Durga Puja festival dates for a given year, since it follows the Hindu lunar calendar"
+    ]
+  },
+  {
+    "name": "Darjeeling",
+    "slug": "darjeeling",
+    "description": "Darjeeling is a West Bengal hill station in the Himalayan foothills, world-famous for its tea estates and for views of Kanchenjunga, the world's third-highest mountain.",
+    "highlights": [
+      "Darjeeling Himalayan Railway (UNESCO World Heritage toy train)",
+      "Tiger Hill sunrise view of Kanchenjunga",
+      "Tea estate tours",
+      "Padmaja Naidu Himalayan Zoological Park"
+    ],
+    "best_time_to_visit": "March to May and October to December, for clearer mountain views.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current Darjeeling Himalayan Railway (toy train) schedule/ticket availability"
+    ]
+  },
+  {
+    "name": "Gangtok, Sikkim",
+    "slug": "gangtok-sikkim",
+    "description": "Gangtok is the capital of Sikkim, a Himalayan state known for Buddhist monasteries, mountain scenery including views toward Kanchenjunga, and as a base for high-altitude lake trips.",
+    "highlights": [
+      "MG Marg (pedestrian promenade)",
+      "Rumtek Monastery",
+      "Tsomgo (Changu) Lake day trip",
+      "Nathula Pass (India-China border)"
+    ],
+    "best_time_to_visit": "March to May and October to December.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current Protected/Restricted Area Permit requirements for foreign tourists visiting Sikkim, and for Indian tourists visiting Nathula Pass/Tsomgo Lake - these rules change periodically"
+    ]
+  },
+  {
+    "name": "Andaman Islands",
+    "slug": "andaman-islands",
+    "description": "The Andaman Islands are a remote Indian archipelago in the Bay of Bengal known for coral reefs, clear turquoise water, and beaches, with Port Blair as the main gateway.",
+    "highlights": [
+      "Radhanagar Beach, Havelock Island",
+      "Scuba diving/snorkeling around Havelock and Neil Islands",
+      "Cellular Jail National Memorial, Port Blair",
+      "Limestone caves and mud volcanoes, Baratang Island"
+    ],
+    "best_time_to_visit": "October to May; monsoon season (roughly May-September) brings rough seas and inter-island ferry disruptions.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current permit requirements for foreign tourists (Restricted Area Permit) and for visiting certain tribal reserve areas",
+      "Current ferry schedules between islands, which are weather-dependent and change seasonally"
+    ]
+  },
+  {
+    "name": "Pushkar",
+    "slug": "pushkar",
+    "description": "Pushkar is a small Rajasthan town built around a sacred lake, known for one of India's few temples dedicated to Brahma and for its annual camel fair.",
+    "highlights": [
+      "Pushkar Lake and its ghats",
+      "Brahma Temple",
+      "Pushkar Camel Fair (Kartik Purnima)",
+      "Rooftop cafes overlooking the lake"
+    ],
+    "best_time_to_visit": "October to March; the Pushkar Camel Fair typically falls in October/November.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Exact Pushkar Camel Fair dates for a given year, since it's set by the Hindu lunar calendar (Kartik Purnima)"
+    ]
+  },
+  {
+    "name": "Mount Abu",
+    "slug": "mount-abu",
+    "description": "Mount Abu is Rajasthan's only hill station, a cool retreat in the Aravalli Range known for the marble-carved Dilwara Jain temples and Nakki Lake.",
+    "highlights": [
+      "Dilwara Jain Temples (intricate marble carving)",
+      "Nakki Lake boating",
+      "Guru Shikhar (highest point in the Aravallis)",
+      "Sunset Point"
+    ],
+    "best_time_to_visit": "October to March, or April-June to escape Rajasthan's plains heat.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current Dilwara Temple visiting rules - photography is restricted inside and dress codes apply, worth confirming current specifics"
+    ]
+  },
+  {
+    "name": "Hampi",
+    "slug": "hampi",
+    "description": "Hampi, in Karnataka, is a UNESCO World Heritage Site set among boulder-strewn landscapes, comprising the ruins of Vijayanagara, once one of the largest Hindu empire capitals in India.",
+    "highlights": [
+      "Virupaksha Temple",
+      "Vittala Temple and its stone chariot",
+      "Climbing Matanga Hill for sunrise/sunset views",
+      "Cycling or coracle rides around the ruins"
+    ],
+    "best_time_to_visit": "October to February, avoiding intense summer heat.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current Hampi Utsav (festival) dates, held annually but on varying dates"
+    ]
+  },
+  {
+    "name": "Ahmedabad",
+    "slug": "ahmedabad",
+    "description": "Ahmedabad, Gujarat's largest city, is India's first UNESCO World Heritage City, known for its old-town pols (traditional neighbourhoods), Indo-Islamic architecture, and Gandhi's Sabarmati Ashram.",
+    "highlights": [
+      "Sabarmati Ashram",
+      "Old city stepwells (Adalaj Stepwell nearby)",
+      "Jama Masjid",
+      "Kankaria Lake",
+      "Sidi Saiyyed Mosque's carved stone windows"
+    ],
+    "best_time_to_visit": "November to February, avoiding intense summer heat.",
+    "content_reviewed": true,
+    "needs_verification": []
+  },
+  {
+    "name": "Pune",
+    "slug": "pune",
+    "description": "Pune, in Maharashtra, is a historic Maratha-empire city that has grown into a major education and IT hub, known for a milder climate than nearby Mumbai and easy access to Western Ghats hill stations.",
+    "highlights": [
+      "Shaniwar Wada fort ruins",
+      "Aga Khan Palace",
+      "Sinhagad Fort trek",
+      "Osho Ashram"
+    ],
+    "best_time_to_visit": "October to February, cooler and dry.",
+    "content_reviewed": true,
+    "needs_verification": []
+  },
+  {
+    "name": "Lonavala",
+    "slug": "lonavala",
+    "description": "Lonavala is a small Western Ghats hill station between Mumbai and Pune, popular as a weekend getaway known for waterfalls, lake views, and its chikki (a local sweet).",
+    "highlights": [
+      "Bhushi Dam (especially lively during monsoon)",
+      "Karla and Bhaja Caves (ancient rock-cut Buddhist caves)",
+      "Tiger's Leap viewpoint",
+      "Lonavala Lake"
+    ],
+    "best_time_to_visit": "June to September for monsoon waterfalls, or October to February for cooler, drier weather.",
+    "content_reviewed": true,
+    "needs_verification": []
+  },
+  {
+    "name": "Mahabaleshwar",
+    "slug": "mahabaleshwar",
+    "description": "Mahabaleshwar is a Western Ghats hill station in Maharashtra, a former British summer capital known for strawberry farms, viewpoints, and boating on Venna Lake.",
+    "highlights": [
+      "Venna Lake boating",
+      "Strawberry farm visits (in season)",
+      "Arthur's Seat and other viewpoints",
+      "Mahabaleshwar Temple, source of the Krishna River"
+    ],
+    "best_time_to_visit": "October to June; strawberry season generally runs March to June.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current strawberry-picking season dates, which vary year to year with weather"
+    ]
+  },
+  {
+    "name": "Lakshadweep",
+    "slug": "lakshadweep",
+    "description": "Lakshadweep is a remote group of coral islands off India's southwest coast in the Arabian Sea, known for lagoons, coral reefs, and tightly restricted tourist access compared to other Indian beach destinations.",
+    "highlights": [
+      "Snorkeling/diving in the lagoons of Agatti or Kavaratti",
+      "Bangaram Island's beaches",
+      "Water sports at Kadmat Island"
+    ],
+    "best_time_to_visit": "October to March, avoiding monsoon season.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current permit requirements to visit Lakshadweep (all visitors, including Indian citizens, need a permit) and which islands are currently open to tourists - access rules here change more than most Indian destinations"
+    ]
+  },
+  {
+    "name": "Dubai",
+    "slug": "dubai",
+    "description": "Dubai is a UAE city known for record-setting modern architecture, luxury shopping and dining, and desert experiences just outside the city, built as a major global travel and business hub.",
+    "highlights": [
+      "Burj Khalifa observation deck",
+      "Dubai Mall and its aquarium",
+      "Desert safari with dune bashing",
+      "Palm Jumeirah",
+      "Dubai Marina and Old Dubai's souks"
+    ],
+    "best_time_to_visit": "November to March, avoiding extreme summer heat.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current visa-on-arrival/e-visa policy for your nationality",
+      "Current Burj Khalifa ticket pricing/tiers"
+    ]
+  },
+  {
+    "name": "Bangkok",
+    "slug": "bangkok",
+    "description": "Bangkok, Thailand's capital, mixes ornate Buddhist temples and royal palaces with a famously busy street-food scene, canals, and modern shopping districts.",
+    "highlights": [
+      "Grand Palace and Wat Phra Kaew",
+      "Wat Arun (Temple of Dawn)",
+      "Chatuchak Weekend Market",
+      "Chao Phraya river boat trip",
+      "Street food in Yaowarat (Chinatown)"
+    ],
+    "best_time_to_visit": "November to February, cooler and drier than the hot season (March-May) or rainy season (June-October).",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current dress-code/entry rules for the Grand Palace and temples"
+    ]
+  },
+  {
+    "name": "Phuket",
+    "slug": "phuket",
+    "description": "Phuket is Thailand's largest island, a major beach resort destination in the Andaman Sea known for its beaches, nightlife, and as a base for boat trips to nearby islands.",
+    "highlights": [
+      "Patong Beach and its nightlife",
+      "Phi Phi Islands day trip",
+      "Big Buddha viewpoint",
+      "Old Phuket Town's Sino-Portuguese architecture"
+    ],
+    "best_time_to_visit": "November to April (dry season); the monsoon season (May-October) brings rougher seas.",
+    "content_reviewed": true,
+    "needs_verification": []
+  },
+  {
+    "name": "Singapore",
+    "slug": "singapore",
+    "description": "Singapore is a compact city-state known for its clean, ultra-modern cityscape, multicultural food scene, and attractions blending nature with architecture, such as its \"Gardens by the Bay.\"",
+    "highlights": [
+      "Gardens by the Bay and the Supertree Grove",
+      "Marina Bay Sands SkyPark",
+      "Sentosa Island",
+      "Chinatown, Little India, and Kampong Glam neighbourhoods",
+      "Singapore Zoo/Night Safari"
+    ],
+    "best_time_to_visit": "Year-round tropical climate; February to April is typically driest.",
+    "content_reviewed": true,
+    "needs_verification": []
+  },
+  {
+    "name": "Bali",
+    "slug": "bali",
+    "description": "Bali is an Indonesian island known for Hindu temples, terraced rice paddies, beaches, and a large wellness/yoga tourism scene centred around towns like Ubud and Seminyak.",
+    "highlights": [
+      "Tegalalang rice terraces",
+      "Uluwatu Temple and its clifftop setting",
+      "Ubud's art markets and Monkey Forest",
+      "Beach clubs in Seminyak/Canggu",
+      "Mount Batur sunrise trek"
+    ],
+    "best_time_to_visit": "April to October (dry season); November to March is the wetter season.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current visa-on-arrival policy and tourist tax requirements for Bali, which have changed in recent years"
+    ]
+  },
+  {
+    "name": "Kuala Lumpur",
+    "slug": "kuala-lumpur",
+    "description": "Kuala Lumpur is Malaysia's capital, known for the twin Petronas Towers, a multicultural food scene spanning Malay, Chinese, and Indian cuisines, and easy access to nearby limestone caves.",
+    "highlights": [
+      "Petronas Twin Towers Skybridge/observation deck",
+      "Batu Caves",
+      "Bukit Bintang shopping/dining district",
+      "Central Market and Chinatown (Petaling Street)"
+    ],
+    "best_time_to_visit": "Year-round tropical climate; June to August tends to be driest.",
+    "content_reviewed": true,
+    "needs_verification": []
+  },
+  {
+    "name": "Maldives",
+    "slug": "maldives",
+    "description": "The Maldives is an Indian Ocean nation of coral atolls known for overwater bungalow resorts, house-reef snorkeling, and being one of the world's premier luxury beach destinations.",
+    "highlights": [
+      "Overwater villa resort stays",
+      "Snorkeling/diving on house reefs",
+      "Sandbank and dolphin-watching excursions",
+      "Sunset fishing trips"
+    ],
+    "best_time_to_visit": "November to April (dry season); May to October is the wetter monsoon season.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current resort/island-specific entry requirements and green tax fees, which are charged per night and can change"
+    ]
+  },
+  {
+    "name": "Paris",
+    "slug": "paris",
+    "description": "Paris, France's capital, is one of the world's most visited cities, known for its museums, historic architecture, and status as a global centre for art, fashion, and cuisine.",
+    "highlights": [
+      "Eiffel Tower",
+      "Louvre Museum",
+      "Notre-Dame Cathedral (exterior/ongoing restoration)",
+      "Montmartre and Sacre-Coeur",
+      "Seine river cruise"
+    ],
+    "best_time_to_visit": "April to June and September to November, avoiding peak summer crowds and heat.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current status of Notre-Dame Cathedral's interior access following its restoration after the 2019 fire",
+      "Current Louvre/Eiffel Tower ticket and timed-entry policies"
+    ]
+  },
+  {
+    "name": "London",
+    "slug": "london",
+    "description": "London, the UK's capital, is a major global city known for its royal landmarks, museums (many free to enter), and a history spanning Roman times to the present.",
+    "highlights": [
+      "Tower of London and the Crown Jewels",
+      "British Museum",
+      "Buckingham Palace and the Changing of the Guard",
+      "Westminster Abbey and Big Ben/Houses of Parliament",
+      "West End theatre"
+    ],
+    "best_time_to_visit": "May to September for the mildest, driest weather (though rain is possible year-round).",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current Changing of the Guard schedule, which varies by season",
+      "Current visa/ETA entry requirements for your nationality"
+    ]
+  },
+  {
+    "name": "Tokyo",
+    "slug": "tokyo",
+    "description": "Tokyo, Japan's capital, blends ultramodern districts and technology with traditional temples and gardens, and is known for its food scene, from Michelin-starred restaurants to casual ramen shops.",
+    "highlights": [
+      "Senso-ji Temple, Asakusa",
+      "Shibuya Crossing",
+      "Meiji Shrine",
+      "Tsukiji Outer Market",
+      "Tokyo Skytree or Tokyo Tower observation deck"
+    ],
+    "best_time_to_visit": "March to May (cherry blossoms) and September to November (autumn colours).",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Approximate cherry blossom bloom dates for a given year - these shift annually and are usually only reliably forecast a few weeks ahead"
+    ]
+  },
+  {
+    "name": "New York",
+    "slug": "new-york",
+    "description": "New York City is the largest city in the United States, known globally for its skyline, Broadway theatre, museums, and its five distinct boroughs.",
+    "highlights": [
+      "Statue of Liberty and Ellis Island",
+      "Central Park",
+      "Times Square and Broadway shows",
+      "The Metropolitan Museum of Art",
+      "Top of the Rock/Empire State Building observation decks"
+    ],
+    "best_time_to_visit": "April to June and September to November, avoiding summer humidity and winter cold.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current ESTA/visa entry requirements for your nationality"
+    ]
+  },
+  {
+    "name": "Rome",
+    "slug": "rome",
+    "description": "Rome, Italy's capital, is one of the world's oldest continuously inhabited cities, home to ancient Roman ruins, Renaissance and Baroque art, and Vatican City within its borders.",
+    "highlights": [
+      "Colosseum and Roman Forum",
+      "Vatican Museums and the Sistine Chapel",
+      "Trevi Fountain",
+      "Pantheon",
+      "Trastevere neighbourhood"
+    ],
+    "best_time_to_visit": "April to June and September to October, avoiding peak summer heat and crowds.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current timed-entry/ticket booking requirements for the Colosseum and Vatican Museums, which change periodically"
+    ]
+  },
+  {
+    "name": "Barcelona",
+    "slug": "barcelona",
+    "description": "Barcelona, the capital of Catalonia, is known for Antoni Gaudi's distinctive modernist architecture, Mediterranean beaches, and a lively tapas and nightlife culture.",
+    "highlights": [
+      "Sagrada Familia",
+      "Park Guell",
+      "La Rambla and La Boqueria market",
+      "Gothic Quarter (Barri Gotic)",
+      "Barceloneta Beach"
+    ],
+    "best_time_to_visit": "May to June and September to October, mild weather without peak-summer crowds.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current Sagrada Familia completion status/construction areas and ticket/timed-entry requirements"
+    ]
+  },
+  {
+    "name": "Istanbul",
+    "slug": "istanbul",
+    "description": "Istanbul is the only major city spanning two continents (Europe and Asia across the Bosphorus), with a history as the former capital of both the Byzantine and Ottoman Empires, reflected in its mosques, palaces, and bazaars.",
+    "highlights": [
+      "Hagia Sophia",
+      "Blue Mosque (Sultan Ahmed Mosque)",
+      "Topkapi Palace",
+      "Grand Bazaar",
+      "Bosphorus cruise"
+    ],
+    "best_time_to_visit": "April to May and September to November, mild weather, fewer crowds than summer.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Hagia Sophia's current visiting rules/prayer-time closures, since its status changed from museum to active mosque in 2020"
+    ]
+  },
+  {
+    "name": "Sydney",
+    "slug": "sydney",
+    "description": "Sydney, Australia's largest city, is known for its harbour setting, the Sydney Opera House, and beach culture, serving as the country's main international gateway.",
+    "highlights": [
+      "Sydney Opera House",
+      "Sydney Harbour Bridge climb",
+      "Bondi Beach and the Bondi-to-Coogee coastal walk",
+      "Taronga Zoo (harbour views)",
+      "The Rocks historic district"
+    ],
+    "best_time_to_visit": "September to November and March to May (Southern Hemisphere spring/autumn), avoiding peak summer crowds/heat.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current visa/ETA entry requirements for your nationality"
+    ]
+  },
+  {
+    "name": "Switzerland",
+    "slug": "switzerland",
+    "description": "Switzerland is a mountainous Central European country known for the Alps, well-preserved lake towns, precision engineering, and extensive scenic rail travel.",
+    "highlights": [
+      "Jungfraujoch ('Top of Europe') rail excursion",
+      "Lake Geneva and Lake Lucerne",
+      "Matterhorn views from Zermatt",
+      "Scenic rail routes (Glacier Express, Bernina Express)",
+      "Interlaken as an adventure-sports base"
+    ],
+    "best_time_to_visit": "June to September for hiking and full Alpine access, or December to March for skiing.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current seasonal opening dates/weather closures for specific mountain passes and cable cars"
+    ]
+  },
+  {
+    "name": "Zurich",
+    "slug": "zurich",
+    "description": "Zurich is Switzerland's largest city, a global finance hub set on Lake Zurich, known for its Old Town, museums, and easy access to the Alps.",
+    "highlights": [
+      "Lake Zurich boat cruise",
+      "Old Town (Altstadt) and Bahnhofstrasse shopping street",
+      "Grossmunster and Fraumunster churches",
+      "Uetliberg viewpoint"
+    ],
+    "best_time_to_visit": "May to September for mild weather.",
+    "content_reviewed": true,
+    "needs_verification": []
+  },
+  {
+    "name": "Kathmandu",
+    "slug": "kathmandu",
+    "description": "Kathmandu, Nepal's capital, sits in a Himalayan valley and is known for its concentration of UNESCO World Heritage Sites, including historic squares and temples, and as the main gateway for Himalayan trekking.",
+    "highlights": [
+      "Kathmandu Durbar Square",
+      "Swayambhunath (Monkey Temple)",
+      "Boudhanath Stupa",
+      "Pashupatinath Temple",
+      "Thamel district for trekking gear and cafes"
+    ],
+    "best_time_to_visit": "September to November and March to May, best visibility for mountain views and stable trekking weather.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current trekking permit (TIMS) requirements and fees, since these are periodically revised"
+    ]
+  },
+  {
+    "name": "Pokhara",
+    "slug": "pokhara",
+    "description": "Pokhara is a lakeside city in Nepal set beneath the Annapurna range, a popular base for trekking (including the Annapurna Circuit) and for paragliding above Phewa Lake.",
+    "highlights": [
+      "Phewa Lake boating",
+      "Paragliding with Annapurna/Machapuchare views",
+      "Sarangkot sunrise viewpoint",
+      "World Peace Pagoda",
+      "Davis Falls"
+    ],
+    "best_time_to_visit": "September to November and March to May, clearest mountain visibility.",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current trekking permit requirements (ACAP/TIMS) for the Annapurna region"
+    ]
+  },
+  {
+    "name": "Colombo",
+    "slug": "colombo",
+    "description": "Colombo, Sri Lanka's largest city and commercial capital, mixes colonial-era Dutch and British architecture with a modern skyline, and is a common gateway to the island's beaches and hill country.",
+    "highlights": [
+      "Galle Face Green promenade",
+      "Gangaramaya Temple",
+      "Old Dutch Hospital shopping/dining precinct",
+      "National Museum of Colombo",
+      "Pettah Market"
+    ],
+    "best_time_to_visit": "December to March, drier on the west/south coast (Sri Lanka's two monsoon seasons affect different coasts at different times).",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current e-visa/ETA (electronic travel authorization) requirements for your nationality"
+    ]
+  },
+  {
+    "name": "Hong Kong",
+    "slug": "hong-kong",
+    "description": "Hong Kong is a dense harbour city known for its skyline, a blend of Cantonese and British colonial influences, and easy contrasts between ultra-urban districts and nearby hiking trails and islands.",
+    "highlights": [
+      "Victoria Peak tram and viewpoint",
+      "Star Ferry across Victoria Harbour",
+      "Big Buddha and Po Lin Monastery, Lantau Island",
+      "Temple Street Night Market",
+      "Symphony of Lights harbour show"
+    ],
+    "best_time_to_visit": "October to December, mild and dry; avoid the humid summer typhoon season (roughly June-September).",
+    "content_reviewed": true,
+    "needs_verification": [
+      "Current visa-free entry duration/requirements for your nationality",
+      "Current typhoon-season travel advisories if visiting June-September"
+    ]
+  }
+]

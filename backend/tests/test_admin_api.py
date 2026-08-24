@@ -22,23 +22,23 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-os.environ["CORS_ORIGINS"] = "http://localhost:3000"
-os.environ["WALLET_URL_SIGNING_SECRET"] = "test-wallet-secret"
-os.environ["INTERNAL_TICKET_API_TOKEN"] = "test-ticket-token"
-os.environ["INTERNAL_ANALYTICS_API_TOKEN"] = "test-analytics-token"
-os.environ["JARVIS_QUEUE_API_TOKEN"] = "test-jarvis-queue-token"
-os.environ["ADMIN_API_KEY"] = "test-master-admin-key-secret"
-os.environ["REVENUECAT_WEBHOOK_AUTH_KEY"] = "test-revenuecat-secret-key"
-os.environ["ADMIN_EMAIL"] = "kandrikaabhinay@gmail.com"
-os.environ["MONGO_URL"] = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
-os.environ["DB_NAME"] = os.environ.get("DB_NAME", "test_database")
+os.environ.setdefault("CORS_ORIGINS", "http://localhost:3000")
+os.environ.setdefault("WALLET_URL_SIGNING_SECRET", "test-wallet-secret")
+os.environ.setdefault("INTERNAL_TICKET_API_TOKEN", "test-internal-token")
+os.environ.setdefault("INTERNAL_ANALYTICS_API_TOKEN", "test-analytics-token")
+os.environ.setdefault("JARVIS_QUEUE_API_TOKEN", "test-jarvis-token")
+os.environ.setdefault("ADMIN_API_KEY", "test-master-admin-key-secret")
+os.environ.setdefault("REVENUECAT_WEBHOOK_AUTH_KEY", "test-revenuecat-key")
+os.environ.setdefault("ADMIN_EMAIL", "kandrikaabhinay@gmail.com")
+os.environ.setdefault("MONGO_URL", "mongodb://localhost:27017")
+os.environ.setdefault("DB_NAME", "test_database")
 
 from conftest import client  # noqa: E402,F401
 from admin_api import _resolve_admin_api_key, _limiter
 
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
 DB_NAME = os.environ.get("DB_NAME", "test_database")
-ADMIN_HEADERS = {"X-Admin-Key": "test-master-admin-key-secret"}
+ADMIN_HEADERS = {"X-Admin-Key": os.environ.get("ADMIN_API_KEY", "test-master-admin-key-secret")}
 
 
 def _db():
@@ -104,9 +104,10 @@ def test_unauthenticated_admin_call_returns_401(client):
 
 def test_jarvis_token_rejected_on_admin_route_403(client):
     """JARVIS_QUEUE_API_TOKEN must NEVER grant access to Admin surface."""
+    token = os.environ.get("JARVIS_QUEUE_API_TOKEN", "test-jarvis-token")
     r = client.get(
         "/api/admin/dashboard-stats",
-        headers={"Authorization": "Bearer test-jarvis-queue-token"},
+        headers={"Authorization": f"Bearer {token}"},
     )
     assert r.status_code == 403
     assert "Token isolation violation" in r.text
@@ -115,9 +116,10 @@ def test_jarvis_token_rejected_on_admin_route_403(client):
 
 def test_ticket_agent_token_rejected_on_admin_route_403(client):
     """INTERNAL_TICKET_API_TOKEN must NEVER grant access to Admin surface."""
+    token = os.environ.get("INTERNAL_TICKET_API_TOKEN", "test-internal-token")
     r = client.get(
         "/api/admin/dashboard-stats",
-        headers={"X-Admin-Key": "test-ticket-token"},
+        headers={"X-Admin-Key": token},
     )
     assert r.status_code == 403
     assert "Token isolation violation" in r.text
@@ -127,7 +129,8 @@ def test_ticket_agent_token_rejected_on_admin_route_403(client):
 
 def test_verify_exchanges_key_for_hashed_session_cookie(client):
     """POST /api/admin/verify validates key, sets httpOnly cookie, and stores SHA-256 hash."""
-    payload = {"admin_key": "test-master-admin-key-secret"}
+    admin_key = os.environ.get("ADMIN_API_KEY", "local-dev-admin-key-for-testing-only")
+    payload = {"admin_key": admin_key}
     r = client.post("/api/admin/verify", json=payload)
     assert r.status_code == 200, f"Got {r.status_code}: {r.text}"
     data = r.json()
@@ -154,7 +157,8 @@ def test_verify_exchanges_key_for_hashed_session_cookie(client):
 
 def test_session_cookie_authenticates_admin_routes(client):
     # 1. Login
-    r_login = client.post("/api/admin/verify", json={"admin_key": "test-master-admin-key-secret"})
+    admin_key = os.environ.get("ADMIN_API_KEY", "local-dev-admin-key-for-testing-only")
+    r_login = client.post("/api/admin/verify", json={"admin_key": admin_key})
     assert r_login.status_code == 200
     session_token = r_login.json()["session_token"]
 

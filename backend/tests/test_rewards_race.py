@@ -235,6 +235,50 @@ def test_concurrent_redeem_points_only_one_succeeds():
         delete_session(user_id, session_token)
 
 
+def test_direct_concurrent_redeem_points_function_only_one_succeeds():
+    """Direct service-level concurrency test: calls rewards_service.redeem_points
+    concurrently from two asyncio tasks against a fresh Motor client.
+    With an initial balance of 150 points and two concurrent redemptions of 100 points
+    (total 200 > 150), exactly one coroutine must succeed and one must raise ValueError('Insufficient points').
+    The final available_points must be 50, and exactly 1 transaction must be recorded."""
+    user_id = f"test_direct_race_redeem_{uuid.uuid4().hex[:10]}"
+    _seed_points(user_id, 150)
+
+    async def _concurrent_redeem():
+        db = _db()
+        results = []
+        errors = []
+
+        async def _call():
+            try:
+                res = await rewards_service.redeem_points(db, user_id, 100)
+                results.append(res)
+            except ValueError as e:
+                errors.append(e)
+
+        await asyncio.gather(_call(), _call())
+        return results, errors
+
+    try:
+        results, errors = _run(_concurrent_redeem())
+        assert len(results) == 1, f"Expected exactly 1 successful redemption, got {len(results)}"
+        assert len(errors) == 1, f"Expected exactly 1 error, got {len(errors)}"
+        assert "insufficient" in str(errors[0]).lower()
+
+        async def _final_state():
+            db = _db()
+            rewards = await db.user_rewards.find_one({'user_id': user_id}, {'_id': 0})
+            txns = await db.rewards_transactions.find({'user_id': user_id}, {'_id': 0}).to_list(10)
+            return rewards, txns
+
+        rewards, txns = _run(_final_state())
+        assert rewards['available_points'] == 50
+        assert len(txns) == 1
+        assert txns[0]['points'] == -100
+    finally:
+        _cleanup(user_id)
+
+
 # ═══════════════ Fix #2: no silent swallow on lost reservation ═══════════════
 
 def test_late_payment_success_after_stale_refund_is_not_silently_swallowed(monkeypatch, caplog):
@@ -365,3 +409,53 @@ def test_reservation_still_held_at_payment_success_finalizes_normally(caplog):
         assert txn['points_reservation_status'] == 'finalized'
     finally:
         _cleanup(user_id, session_ids=[session_id])
+
+
+def test_concurrent_first_time_user_get_or_create_and_redeem_creates_single_document():
+    """Concurrency test for a brand-new user with NO existing user_rewards document:
+    Runs simultaneous get_or_create_rewards and redeem_points calls via asyncio.gather.
+    Confirms:
+    1. Only ONE user_rewards document is created for user_id (no DuplicateKeyError crash, no duplicate docs).
+    2. Document correctly initializes at 0 points.
+    3. Both redeem calls cleanly handle the 0 balance (both raise ValueError('Insufficient points') without crashing or corrupting data)."""
+    user_id = f"test_brand_new_user_{uuid.uuid4().hex[:10]}"
+
+    async def _test():
+        db = _db()
+        # Verify document does NOT exist initially
+        initial = await db.user_rewards.find_one({'user_id': user_id})
+        assert initial is None
+
+        # Two concurrent calls to get_or_create_rewards for a brand-new user
+        res1, res2 = await asyncio.gather(
+            rewards_service.get_or_create_rewards(db, user_id),
+            rewards_service.get_or_create_rewards(db, user_id),
+        )
+        assert res1['user_id'] == user_id
+        assert res2['user_id'] == user_id
+
+        # Verify exactly ONE document exists in DB
+        docs = await db.user_rewards.find({'user_id': user_id}).to_list(10)
+        assert len(docs) == 1
+
+        # Now test concurrent redeem_points for a brand-new user with 0 points
+        errors = []
+        async def _try_redeem():
+            try:
+                await rewards_service.redeem_points(db, user_id, 100)
+            except ValueError as e:
+                errors.append(e)
+
+        await asyncio.gather(_try_redeem(), _try_redeem())
+        assert len(errors) == 2
+        assert all("insufficient" in str(err).lower() for err in errors)
+
+        # Still exactly ONE document with 0 points
+        docs = await db.user_rewards.find({'user_id': user_id}).to_list(10)
+        assert len(docs) == 1
+        assert docs[0]['available_points'] == 0
+
+    try:
+        _run(_test())
+    finally:
+        _cleanup(user_id)

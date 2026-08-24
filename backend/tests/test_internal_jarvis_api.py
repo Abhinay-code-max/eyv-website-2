@@ -548,3 +548,42 @@ def test_wrong_token_requests_are_rate_limited_too(client):
         except Exception:
             pass
 
+
+def test_post_jarvis_queue_enqueues_item(client):
+    payload = {
+        "source_agent": "denver",
+        "item_type": "ticket_review",
+        "payload": {"ticket_id": f"ticket_test_{uuid.uuid4().hex[:8]}", "reason": "high priority bug"},
+        "priority": 2,
+    }
+    r = client.post("/jarvis/queue", json=payload, headers=AUTH_HEADERS)
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["status"] == "enqueued"
+    assert data["item"]["source_agent"] == "denver"
+    assert data["item"]["priority"] == 2
+
+    # Clean up
+    async def _clean():
+        db = _db()
+        await db.jarvis_queue_items.delete_one({"_id": ObjectId(data["item"]["id"])})
+    _run(_clean())
+
+
+def test_get_jarvis_queue_stats(client):
+    q_id = _seed_queue_item(status="pending")
+    try:
+        r = client.get("/jarvis/queue/stats", headers=AUTH_HEADERS)
+        assert r.status_code == 200, r.text
+        data = r.json()
+        assert "pending" in data
+        assert "resolved" in data
+        assert "total" in data
+        assert data["pending"] >= 1
+    finally:
+        async def _clean():
+            db = _db()
+            await db.jarvis_queue_items.delete_one({"_id": ObjectId(q_id)})
+        _run(_clean())
+
+

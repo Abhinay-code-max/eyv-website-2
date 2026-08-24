@@ -22,13 +22,13 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-os.environ["CORS_ORIGINS"] = "http://localhost:3000"
-os.environ["WALLET_URL_SIGNING_SECRET"] = "test-wallet-secret"
-os.environ["INTERNAL_TICKET_API_TOKEN"] = "test-ticket-token"
-os.environ["INTERNAL_ANALYTICS_API_TOKEN"] = "test-analytics-token"
-os.environ["JARVIS_QUEUE_API_TOKEN"] = "test-jarvis-queue-token"
-os.environ["MONGO_URL"] = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
-os.environ["DB_NAME"] = os.environ.get("DB_NAME", "test_database")
+os.environ.setdefault("CORS_ORIGINS", "http://localhost:3000")
+os.environ.setdefault("WALLET_URL_SIGNING_SECRET", "test-wallet-secret")
+os.environ.setdefault("INTERNAL_TICKET_API_TOKEN", "test-internal-token")
+os.environ.setdefault("INTERNAL_ANALYTICS_API_TOKEN", "test-analytics-token")
+os.environ.setdefault("JARVIS_QUEUE_API_TOKEN", "test-jarvis-token")
+os.environ.setdefault("MONGO_URL", "mongodb://localhost:27017")
+os.environ.setdefault("DB_NAME", "test_database")
 
 from conftest import client  # noqa: E402,F401
 from services.marketing_agent_service import (
@@ -42,7 +42,7 @@ from services.marketing_channels.whatsapp_client import WhatsAppClient
 
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
 DB_NAME = os.environ.get("DB_NAME", "test_database")
-AUTH_HEADERS = {"Authorization": "Bearer test-jarvis-queue-token"}
+AUTH_HEADERS = {"Authorization": f"Bearer {os.environ.get('JARVIS_QUEUE_API_TOKEN', 'test-jarvis-token')}"}
 
 
 

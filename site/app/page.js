@@ -27,6 +27,15 @@ export default function HomePage() {
           </Link>
         ))}
       </div>
+
+      <footer className="page-footer">
+        <p className="meta">© 2026 EYV. Enjoy Your Vacation — We Plan Everything.</p>
+        <div style={{ display: "flex", gap: "1.25rem", fontSize: "0.85rem" }}>
+          <Link href="/privacy">Privacy</Link>
+          <Link href="/terms">Terms</Link>
+          <Link href="/refund-policy">Refund Policy</Link>
+        </div>
+      </footer>
     </main>
   );
 }

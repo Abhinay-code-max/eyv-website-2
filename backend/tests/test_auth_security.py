@@ -9,6 +9,7 @@ legitimate way to call - e.g. crafting a correctly-signed-but-already-
 expired download link without sleeping in real time for the TTL to pass.
 """
 import asyncio
+import concurrent.futures
 import io
 import os
 import sys
@@ -109,6 +110,99 @@ def test_login_twice_keeps_both_sessions():
             db = _db()
             await db.users.delete_many({"user_id": user_id})
             await db.user_sessions.delete_many({"user_id": user_id})
+        _run(_cleanup())
+
+
+def test_exchange_session_signals_new_and_returning_users():
+    """exchange_session must explicitly return is_new_user: true for brand-new accounts
+    and is_new_user: false for existing returning accounts."""
+    email = f"signals_{uuid.uuid4().hex[:10]}@example.com"
+    ticket_first = _seed_oauth_ticket(email, name="New User Signup")
+    ticket_second = _seed_oauth_ticket(email, name="Returning User Login")
+
+    # First exchange: Brand-new user record
+    r_first = requests.post(f"{BASE_URL}/api/auth/session", json={"session_id": ticket_first})
+    assert r_first.status_code == 200, r_first.text
+    data_first = r_first.json()
+    assert "is_new_user" in data_first, "Missing is_new_user signal in response"
+    assert data_first["is_new_user"] is True
+    user_id = data_first["user"]["user_id"]
+
+    try:
+        # Second exchange with same email: Existing returning user
+        r_second = requests.post(f"{BASE_URL}/api/auth/session", json={"session_id": ticket_second})
+        assert r_second.status_code == 200, r_second.text
+        data_second = r_second.json()
+        assert "is_new_user" in data_second, "Missing is_new_user signal in response"
+        assert data_second["is_new_user"] is False
+        assert data_second["user"]["user_id"] == user_id
+    finally:
+        async def _cleanup():
+            db = _db()
+            await db.users.delete_many({"user_id": user_id})
+            await db.user_sessions.delete_many({"user_id": user_id})
+        _run(_cleanup())
+
+
+def test_concurrent_exchange_session_brand_new_email_creates_single_user():
+    """Concurrency test for brand-new user OAuth session exchange:
+    Two concurrent /api/auth/session requests for the same brand-new email
+    fired simultaneously via ThreadPoolExecutor.
+
+    Ensures:
+    1. Both requests succeed with HTTP 200 (no 500 crashes from DuplicateKeyError).
+    2. Exactly ONE user document is created in db.users for that email.
+    3. Both sessions reference the EXACT same user_id.
+    4. Exactly one request gets is_new_user: true (the insert winner) and the
+       other gets is_new_user: false (the race loser recovering gracefully).
+    5. Two distinct user sessions are created in db.user_sessions.
+    """
+    email = f"concurrent_signup_{uuid.uuid4().hex[:10]}@example.com"
+    ticket_a = _seed_oauth_ticket(email, name="Concurrent Traveler A")
+    ticket_b = _seed_oauth_ticket(email, name="Concurrent Traveler B")
+
+    def _exchange(ticket):
+        return requests.post(f"{BASE_URL}/api/auth/session", json={"session_id": ticket})
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        fut_a = pool.submit(_exchange, ticket_a)
+        fut_b = pool.submit(_exchange, ticket_b)
+        resp_a = fut_a.result(timeout=30)
+        resp_b = fut_b.result(timeout=30)
+
+    assert resp_a.status_code == 200, f"resp_a failed: {resp_a.text}"
+    assert resp_b.status_code == 200, f"resp_b failed: {resp_b.text}"
+
+    data_a = resp_a.json()
+    data_b = resp_b.json()
+
+    user_id_a = data_a["user"]["user_id"]
+    user_id_b = data_b["user"]["user_id"]
+
+    # Invariant: single consistent user_id across both responses
+    assert user_id_a == user_id_b, f"User IDs differed across concurrent signups: {user_id_a} vs {user_id_b}"
+
+    # Invariant: exactly one is_new_user == True, the other == False
+    signals = sorted([data_a["is_new_user"], data_b["is_new_user"]])
+    assert signals == [False, True], f"Expected exactly one True and one False is_new_user, got: {signals}"
+
+    try:
+        # Invariant: Exactly ONE user document in database
+        async def _verify_db():
+            db = _db()
+            user_docs = await db.users.find({"email": email}).to_list(10)
+            session_docs = await db.user_sessions.find({"user_id": user_id_a}).to_list(10)
+            return user_docs, session_docs
+
+        user_docs, session_docs = _run(_verify_db())
+        assert len(user_docs) == 1, f"Expected 1 user document, found {len(user_docs)}"
+        assert user_docs[0]["user_id"] == user_id_a
+        assert len(session_docs) == 2, f"Expected 2 active sessions, found {len(session_docs)}"
+    finally:
+        async def _cleanup():
+            db = _db()
+            await db.users.delete_many({"user_id": user_id_a})
+            await db.user_sessions.delete_many({"user_id": user_id_a})
         _run(_cleanup())
 
 

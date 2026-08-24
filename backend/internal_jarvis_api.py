@@ -187,6 +187,21 @@ def _parse_object_id(id_str: str) -> ObjectId:
         raise HTTPException(status_code=400, detail=f"Invalid ID format: {id_str}")
 
 
+class JarvisQueueItemCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source_agent: str
+    item_type: str
+    payload: Optional[Dict[str, Any]] = None
+    priority: int = Field(default=5, ge=1, le=10)
+
+    @field_validator("source_agent", "item_type")
+    @classmethod
+    def _non_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("must not be blank")
+        return v.strip()
+
+
 class JarvisDecisionCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     queue_item_id: Optional[str] = None
@@ -270,6 +285,43 @@ async def get_jarvis_queue(
     }
 
 
+@router.post("/queue")
+@_limiter.limit(JARVIS_QUEUE_API_RATE_LIMIT, key_func=get_bearer_token_key)
+async def post_jarvis_queue_item(
+    request: Request,
+    req: JarvisQueueItemCreateRequest,
+) -> Dict[str, Any]:
+    """Sub-agents (Denver, Bob, Sara) enqueue work items for JARVIS through this endpoint."""
+    db = request.app.state.jarvis_db
+    from services.jarvis_queue_service import enqueue_jarvis_item
+    item = await enqueue_jarvis_item(
+        db,
+        source_agent=req.source_agent,
+        item_type=req.item_type,
+        payload=req.payload,
+        priority=req.priority,
+    )
+    request.state.audit_summary = {
+        "queue_item_id": item.id,
+        "source_agent": req.source_agent,
+        "item_type": req.item_type,
+        "priority": req.priority,
+    }
+    return {"item": item.model_dump(mode="json"), "status": "enqueued"}
+
+
+@router.get("/queue/stats")
+@_limiter.limit(JARVIS_QUEUE_API_RATE_LIMIT, key_func=get_bearer_token_key)
+async def get_jarvis_queue_stats(request: Request) -> Dict[str, Any]:
+    """Summary counts of queue items for /status and /stats operational commands."""
+    db = request.app.state.jarvis_db
+    pending = await db.jarvis_queue_items.count_documents({"status": "pending"})
+    resolved = await db.jarvis_queue_items.count_documents({"status": "resolved"})
+    total = await db.jarvis_queue_items.count_documents({})
+    request.state.audit_summary = {"pending": pending, "resolved": resolved, "total": total}
+    return {"pending": pending, "resolved": resolved, "total": total}
+
+
 @router.post("/decisions")
 @_limiter.limit(JARVIS_QUEUE_API_RATE_LIMIT, key_func=get_bearer_token_key)
 async def post_jarvis_decision(
@@ -322,7 +374,7 @@ async def post_jarvis_decision(
 
     # Trigger marketing agent execution if this decision specifies a marketing action
     try:
-        from services.marketing_agent_service import handle_jarvis_marketing_decision
+        from agents.bob.marketing_agent_service import handle_jarvis_marketing_decision
         await handle_jarvis_marketing_decision(db, decision_dict)
     except Exception as m_exc:
         logger.warning(f"Marketing execution hook error: {m_exc}")

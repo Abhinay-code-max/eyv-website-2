@@ -22,14 +22,14 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-os.environ["CORS_ORIGINS"] = "http://localhost:3000"
-os.environ["WALLET_URL_SIGNING_SECRET"] = "test-wallet-secret"
-os.environ["INTERNAL_TICKET_API_TOKEN"] = "test-ticket-token"
-os.environ["INTERNAL_ANALYTICS_API_TOKEN"] = "test-analytics-token"
-os.environ["JARVIS_QUEUE_API_TOKEN"] = "test-jarvis-queue-token"
-os.environ["REVENUECAT_WEBHOOK_AUTH_KEY"] = "test-revenuecat-secret-key"
-os.environ["MONGO_URL"] = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
-os.environ["DB_NAME"] = os.environ.get("DB_NAME", "test_database")
+os.environ.setdefault("CORS_ORIGINS", "http://localhost:3000")
+os.environ.setdefault("WALLET_URL_SIGNING_SECRET", "test-wallet-secret")
+os.environ.setdefault("INTERNAL_TICKET_API_TOKEN", "test-internal-token")
+os.environ.setdefault("INTERNAL_ANALYTICS_API_TOKEN", "test-analytics-token")
+os.environ.setdefault("JARVIS_QUEUE_API_TOKEN", "test-jarvis-token")
+os.environ.setdefault("REVENUECAT_WEBHOOK_AUTH_KEY", "test-revenuecat-key")
+os.environ.setdefault("MONGO_URL", "mongodb://localhost:27017")
+os.environ.setdefault("DB_NAME", "test_database")
 
 from conftest import client  # noqa: E402,F401
 from server import _resolve_revenuecat_webhook_key
@@ -42,7 +42,7 @@ from services.analytics_agent_service import (
 
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
 DB_NAME = os.environ.get("DB_NAME", "test_database")
-RC_AUTH_HEADERS = {"Authorization": "Bearer test-revenuecat-secret-key"}
+RC_AUTH_HEADERS = {"Authorization": f"Bearer {os.environ.get('REVENUECAT_WEBHOOK_AUTH_KEY', 'test-revenuecat-key')}"}
 
 
 def _db():

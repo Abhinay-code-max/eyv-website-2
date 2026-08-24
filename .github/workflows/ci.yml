@@ -86,14 +86,11 @@ jobs:
       # those are deliberately left unset here rather than added as secrets
       # for no behavioral benefit.
       #
-      # test_rewards_payments.py's checkout tests are the one exception:
-      # POST /api/payments/checkout calls the real stripe.checkout.Session.create,
-      # gated by _ensure_stripe_configured() - there's no mock fallback for
-      # Stripe the way there is for flights/hotels. Needs a real Stripe
-      # *test-mode* secret key added as a repo secret named STRIPE_API_KEY
-      # (Settings > Secrets and variables > Actions) for those tests to pass;
-      # without it they fail with 500 "Stripe not configured" (confirmed).
-      STRIPE_API_KEY: ${{ secrets.STRIPE_API_KEY }}
+      # All Stripe payment and checkout tests (test_payment_provider.py,
+      # test_payment_webhook_race.py, test_rewards_payments.py) strictly mock
+      # the Stripe SDK to prevent making live API calls or polluting the Stripe
+      # test-mode dashboard.
+      STRIPE_API_KEY: ${{ secrets.STRIPE_API_KEY || 'sk_test_placeholder_key' }}
       REACT_APP_BACKEND_URL: http://localhost:8001
     steps:
       - uses: actions/checkout@v4
@@ -152,6 +149,7 @@ jobs:
             tests/test_group_pricing.py \
             tests/test_plan_generation_crash.py \
             tests/backend_test.py \
+            tests/test_trip_regenerate.py \
             tests/test_new_features.py \
             tests/test_auth_security.py \
             tests/test_rewards_payments.py \
@@ -225,6 +223,7 @@ jobs:
             tests/test_road_pricing.py \
             tests/test_rewards_math.py \
             tests/test_pricing_recompute_invariant.py \
+            tests/test_payment_provider.py \
             tests/test_payment_webhook_race.py \
             -v --junit-xml=pytest-unit-results.xml 2>&1 | tee pytest-unit-output.log
           exit ${PIPESTATUS[0]}

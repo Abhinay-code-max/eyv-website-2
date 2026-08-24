@@ -27,7 +27,7 @@ from slowapi import Limiter
 
 from db_models import AdminAuditLogDoc, AdminSessionDoc
 from rate_limit_keys import get_trusted_client_ip
-from services.marketing_agent_service import generate_campaign_draft, resolve_campaign_image
+from agents.bob.marketing_agent_service import generate_campaign_draft, resolve_campaign_image
 
 logger = logging.getLogger(__name__)
 
@@ -376,7 +376,7 @@ async def post_admin_decision(
     action_type = payload.action.get("type")
     execution_result = None
     if action_type == "execute_campaign" and payload.resolution_status == "resolved":
-        from services.marketing_agent_service import handle_jarvis_marketing_decision
+        from agents.bob.marketing_agent_service import handle_jarvis_marketing_decision
         execution_result = await handle_jarvis_marketing_decision(db, dec_doc)
 
     await _audit_admin_action(
@@ -537,3 +537,19 @@ async def get_admin_audit_log(
         logs.append(doc)
 
     return {"count": len(logs), "logs": logs}
+
+
+@router.get("/usage-summary")
+@_limiter.limit("60/minute")
+async def get_admin_usage_summary(
+    request: Request,
+    x_admin_key: Optional[str] = Header(default=None, alias="X-Admin-Key"),
+):
+    """Admin usage summary for Gemini, Duffel, SerpApi, etc."""
+    admin_key_env = os.environ.get("ADMIN_API_KEY", "")
+    if not admin_key_env or not x_admin_key or not hmac.compare_digest(x_admin_key, admin_key_env):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    db = _get_admin_db(request)
+    from services import usage_service
+    return await usage_service.get_usage_summary(db)
+

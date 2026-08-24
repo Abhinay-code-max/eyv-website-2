@@ -173,6 +173,12 @@ const TripPlannerPage = ({ user }) => {
         payload,
         { withCredentials: true }
       );
+      if (window.posthog) {
+        const tripMode = (formData.transportation || 'flight').toLowerCase();
+        window.posthog.capture('trip_generated', {
+          trip_mode: tripMode,
+        });
+      }
       navigate(`/trip-results/${response.data.trip_id}`);
     } catch (error) {
       console.error('Error generating trip:', error);

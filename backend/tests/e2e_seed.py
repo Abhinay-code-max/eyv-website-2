@@ -13,6 +13,7 @@ at all.
 Usage:
   python e2e_seed.py seed-session --user-id U --token T
   python e2e_seed.py seed-trip --trip-id ID --user-id U --json '<trip json>'
+  python e2e_seed.py seed-notification --user-id U --status S --title T --body B
   python e2e_seed.py cleanup --user-id U --token T [--trip-id ID]
 
 Each subcommand prints "OK" on success (exit 0) or a traceback (exit 1) -
@@ -62,12 +63,37 @@ def cmd_seed_trip(args):
     _run(_do())
 
 
+def cmd_seed_notification(args):
+    """Writes directly into db.notifications - the same shortcut
+    seed-trip already takes (bypassing notification_service.py's own
+    fan-out entirely, which needs a real ticket + reporter + successful
+    email send to produce one) so the Playwright bell/list smoke test can
+    assert on a known notification without depending on that whole chain
+    or a live email provider."""
+    async def _do():
+        db = _db()
+        now = datetime.now(timezone.utc)
+        await db.notifications.insert_one({
+            "user_id": args.user_id,
+            "ticket_id": args.ticket_id,
+            "status": args.status,
+            "title": args.title,
+            "body": args.body,
+            "read": False,
+            "created_at": now,
+        })
+    _run(_do())
+
+
 def cmd_cleanup(args):
     delete_session(args.user_id, args.token)
 
     async def _do():
         db = _db()
         await db.users.delete_many({"user_id": args.user_id})
+        await db.notifications.delete_many({"user_id": args.user_id})
+        await db.tickets.delete_many({"reporter_user_ids": args.user_id})
+        await db.generation_logs.delete_many({"trip_id": f"support_{args.user_id}"})
         if args.trip_id:
             await db.trips.delete_many({"trip_id": args.trip_id})
             await db.bookings.delete_many({"trip_id": args.trip_id})
@@ -89,6 +115,15 @@ def main():
     p_trip.add_argument("--user-id", required=True)
     p_trip.add_argument("--json", required=True, help="JSON object merged into the trip document")
     p_trip.set_defaults(func=cmd_seed_trip)
+
+    p_notification = sub.add_parser("seed-notification")
+    p_notification.add_argument("--user-id", required=True)
+    p_notification.add_argument("--ticket-id", default="e2e_ticket_placeholder")
+    p_notification.add_argument("--status", default="implemented",
+                                 choices=["implemented", "rejected", "backlog"])
+    p_notification.add_argument("--title", default="Fixed: your report")
+    p_notification.add_argument("--body", default="Your report has been implemented and is live.")
+    p_notification.set_defaults(func=cmd_seed_notification)
 
     p_cleanup = sub.add_parser("cleanup")
     p_cleanup.add_argument("--user-id", required=True)

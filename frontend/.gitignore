@@ -26,3 +26,10 @@
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# Backup files
+*.backup
+*.backup*
+*.backup[0-9]*
+*.jsx.backup
+*.js.backup

@@ -5,6 +5,9 @@ export const API_URL = process.env.REACT_APP_BACKEND_URL + '/api';
 // React Router state since the SPA fully unloads during that trip.
 export const POST_LOGIN_REDIRECT_KEY = 'eyv_post_login_redirect';
 
+// sessionStorage key used to track whether the user initiated from /login or /signup
+export const AUTH_INTENT_KEY = 'eyv_auth_intent';
+
 export const BUDGET_LEVELS = [
   { value: 'Budget', label: 'Budget', description: 'Most economical options' },
   { value: 'Premium', label: 'Premium', description: 'Best value for comfort' },

@@ -42,10 +42,17 @@ function seedTrip(tripId, userId, tripJson) {
   run(['seed-trip', '--trip-id', tripId, '--user-id', userId, '--json', JSON.stringify(tripJson)]);
 }
 
+function seedNotification(userId, { status = 'implemented', title, body } = {}) {
+  const args = ['seed-notification', '--user-id', userId, '--status', status];
+  if (title) args.push('--title', title);
+  if (body) args.push('--body', body);
+  run(args);
+}
+
 function cleanup(userId, token, tripId) {
   const args = ['cleanup', '--user-id', userId, '--token', token];
   if (tripId) args.push('--trip-id', tripId);
   run(args);
 }
 
-module.exports = { seedSession, seedTrip, cleanup };
+module.exports = { seedSession, seedTrip, seedNotification, cleanup };

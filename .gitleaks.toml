@@ -1,0 +1,14 @@
+title = "EYV gitleaks config"
+
+# Extend the default gitleaks ruleset (keeps upstream secret-detection rules
+# up to date instead of maintaining a custom rule list).
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Ignore placeholder/example values and generated lockfiles"
+paths = [
+  '''\.env\.example$''',
+  '''yarn\.lock$''',
+  '''package-lock\.json$''',
+]

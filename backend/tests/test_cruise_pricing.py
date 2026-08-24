@@ -53,40 +53,14 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+from conftest import seed_session, delete_session
+
+
 @pytest.fixture(scope="module", autouse=True)
 def _setup_and_teardown():
-    async def _seed():
-        db = _db()
-        now = datetime.now(timezone.utc)
-        await db.users.update_one(
-            {"user_id": USER_ID},
-            {"$set": {
-                "user_id": USER_ID, "email": f"{USER_ID}@example.com", "name": "Test",
-                "created_at": now.isoformat(), "stripe_subscription_status": "inactive",
-            }},
-            upsert=True,
-        )
-        token_hash = server._hash_session_token(SESSION)
-        await db.user_sessions.update_one(
-            {"session_token": token_hash},
-            {"$set": {
-                "session_token": token_hash, "user_id": USER_ID,
-                "session_id": token_hash[:32],
-                "expires_at": (now + timedelta(days=7)).isoformat(), "created_at": now.isoformat(),
-            }},
-            upsert=True,
-        )
-        await db.generation_quota.delete_many({"user_id": USER_ID})
-    _run(_seed())
+    seed_session(USER_ID, SESSION)
     yield
-
-    async def _cleanup():
-        db = _db()
-        await db.users.delete_many({"user_id": USER_ID})
-        await db.user_sessions.delete_many({"session_token": server._hash_session_token(SESSION)})
-        await db.generation_quota.delete_many({"user_id": USER_ID})
-        await db.trips.delete_many({"user_id": USER_ID})
-    _run(_cleanup())
+    delete_session(USER_ID, SESSION)
 
 
 async def _no_duffel_call(*args, **kwargs):

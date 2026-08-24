@@ -1,6 +1,8 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getAllDestinations, getDestinationBySlug, getSiteUrl, getPlanTripUrl } from "../../../lib/destinations";
+import DestinationTracker from "./DestinationTracker";
+import PlanTripLink from "../../components/PlanTripLink";
 
 // Only the statically generated slugs below are ever served - an unlisted
 // or excluded slug (e.g. hawa-mahal-jaipur, held back for its unresolved
@@ -74,6 +76,7 @@ export default async function DestinationPage({ params }) {
 
   return (
     <main className="wrap">
+      <DestinationTracker slug={dest.slug} />
       {/* eslint-disable-next-line react/no-danger */}
       <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }} />
 
@@ -87,9 +90,9 @@ export default async function DestinationPage({ params }) {
       </p>
       <h1>{dest.name}</h1>
       <p className="best-time">Best time to visit: {dest.best_time_to_visit}</p>
-      <a className="cta" href={ctaUrl}>
+      <PlanTripLink className="cta" href={ctaUrl}>
         Plan a trip here
-      </a>
+      </PlanTripLink>
 
       <p className="description" style={{ marginTop: "1.75rem" }}>
         {dest.description}
@@ -119,9 +122,17 @@ export default async function DestinationPage({ params }) {
             ? `${dest.lat.toFixed(4)}, ${dest.lng.toFixed(4)}`
             : null}
         </p>
-        <a className="cta" href={ctaUrl}>
+        <PlanTripLink className="cta" href={ctaUrl}>
           Plan a trip to {dest.name}
-        </a>
+        </PlanTripLink>
+        <div style={{ width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: "1rem", marginTop: "1rem", borderTop: "1px solid var(--border)", fontSize: "0.8125rem", color: "var(--ink-muted)" }}>
+          <span>© 2026 EYV Travel</span>
+          <div style={{ display: "flex", gap: "1rem" }}>
+            <Link href="/privacy">Privacy</Link>
+            <Link href="/terms">Terms</Link>
+            <Link href="/refund-policy">Refund Policy</Link>
+          </div>
+        </div>
       </footer>
     </main>
   );

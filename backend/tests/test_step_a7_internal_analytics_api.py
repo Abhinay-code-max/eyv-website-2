@@ -319,3 +319,64 @@ def test_wrong_token_requests_are_rate_limited_too():
         f"expected only 401 (auth rejected) or 429 (rate limited) responses "
         f"for wrong-token requests, got: {sorted(set(statuses))}"
     )
+
+
+def test_post_promotion_creates_code():
+    code = f"TEST_PROMO_{uuid.uuid4().hex[:6].upper()}"
+    try:
+        r = requests.post(
+            f"{BASE_URL}/api/internal/analytics/promotions",
+            json={"code": code, "discount_type": "percent", "discount_value": 15.0, "valid_days": 10, "usage_cap": 50},
+            headers=AUTH_HEADERS,
+            timeout=10,
+        )
+        assert r.status_code == 200, r.text
+        data = r.json()
+        assert data["status"] == "created"
+        assert data["promotion"]["code"] == code
+        assert data["promotion"]["discount_value"] == 15.0
+    finally:
+        _delete_many("promotions", {"code": code})
+
+
+def test_campaign_crud_lifecycle():
+    title = f"Test Campaign {uuid.uuid4().hex[:6]}"
+    # 1. Create
+    r = requests.post(
+        f"{BASE_URL}/api/internal/analytics/campaigns",
+        json={"title": title, "channel": "buffer", "status": "pending_approval", "content": {"caption": "Explore Goa!"}},
+        headers=AUTH_HEADERS,
+        timeout=10,
+    )
+    assert r.status_code == 200, r.text
+    camp = r.json()
+    camp_id = camp["campaign_id"]
+
+    try:
+        # 2. Get single
+        r_get = requests.get(f"{BASE_URL}/api/internal/analytics/campaigns/{camp_id}", headers=AUTH_HEADERS, timeout=10)
+        assert r_get.status_code == 200, r_get.text
+        assert r_get.json()["campaign"]["title"] == title
+
+        # 3. Patch
+        r_patch = requests.patch(
+            f"{BASE_URL}/api/internal/analytics/campaigns/{camp_id}",
+            json={"status": "published", "external_post_id": "buf_12345"},
+            headers=AUTH_HEADERS,
+            timeout=10,
+        )
+        assert r_patch.status_code == 200, r_patch.text
+        assert r_patch.json()["campaign"]["status"] == "published"
+        assert r_patch.json()["campaign"]["external_post_id"] == "buf_12345"
+
+        # 4. Stats
+        r_stats = requests.get(f"{BASE_URL}/api/internal/analytics/campaigns/stats", headers=AUTH_HEADERS, timeout=10)
+        assert r_stats.status_code == 200, r_stats.text
+        stats = r_stats.json()
+        assert "total" in stats
+        assert "published" in stats
+        assert "pending" in stats
+    finally:
+        from bson import ObjectId
+        _delete_many("marketing_campaigns", {"_id": ObjectId(camp_id)})
+

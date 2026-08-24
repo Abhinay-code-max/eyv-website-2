@@ -45,9 +45,18 @@ def _wait_for_trip_completion(trip_id, headers, timeout=300, poll_interval=3):
         if all(p.get("status") != "generating" for p in trip["plans"]):
             return trip
         time.sleep(poll_interval)
-    raise TimeoutError(f"trip {trip_id} did not finish generating within {timeout}s")
+from conftest import seed_session, delete_session
+
 SESSION_TOKEN = os.environ.get('TEST_SESSION_TOKEN', 'test_session_eyv_1780670554293')
+USER_ID = "test_group_pricing_user"
 HEADERS = {"Authorization": f"Bearer {SESSION_TOKEN}", "Content-Type": "application/json"}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _seeded_session():
+    seed_session(USER_ID, SESSION_TOKEN)
+    yield
+    delete_session(USER_ID, SESSION_TOKEN)
 
 BASE_PREFS = dict(
     destination="Goa",
