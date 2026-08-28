@@ -34,6 +34,15 @@ BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 
+os.environ.setdefault("CORS_ORIGINS", "http://localhost:3000")
+os.environ.setdefault("WALLET_URL_SIGNING_SECRET", "test-wallet-secret")
+os.environ.setdefault("INTERNAL_TICKET_API_TOKEN", "test-internal-token")
+os.environ.setdefault("INTERNAL_ANALYTICS_API_TOKEN", "test-analytics-token")
+os.environ.setdefault("JARVIS_QUEUE_API_TOKEN", "test-jarvis-token")
+os.environ.setdefault("ADMIN_API_KEY", "test-master-admin-key-secret")
+os.environ.setdefault("REVENUECAT_WEBHOOK_AUTH_KEY", "test-revenuecat-key")
+
+
 
 def hash_session_token(token):
     return hashlib.sha256(token.encode("utf-8")).hexdigest()

@@ -16,6 +16,8 @@ import asyncio
 import math
 import os
 import sys
+import uuid
+from datetime import datetime, timezone
 
 import pytest
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -23,7 +25,16 @@ from motor.motor_asyncio import AsyncIOMotorClient
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BACKEND_DIR)
 
+os.environ.setdefault("CORS_ORIGINS", "http://localhost:3000")
+os.environ.setdefault("WALLET_URL_SIGNING_SECRET", "test-wallet-secret")
+os.environ.setdefault("INTERNAL_TICKET_API_TOKEN", "test-internal-token")
+os.environ.setdefault("INTERNAL_ANALYTICS_API_TOKEN", "test-analytics-token")
+os.environ.setdefault("JARVIS_QUEUE_API_TOKEN", "test-jarvis-token")
+os.environ.setdefault("ADMIN_API_KEY", "test-master-admin-key-secret")
+os.environ.setdefault("REVENUECAT_WEBHOOK_AUTH_KEY", "test-revenuecat-key")
+
 import server  # noqa: E402
+
 
 MONGO_URL = os.environ.get('MONGO_URL', 'mongodb://localhost:27017')
 DB_NAME = os.environ.get('DB_NAME', 'test_database')
@@ -173,3 +184,208 @@ def test_price_is_per_vehicle_not_per_seat(monkeypatch):
     assert five_travelers["road_vehicle_count"] == 2
     assert five_travelers["road_price"] == pytest.approx(one_traveler["road_price"] * 2)
     assert five_travelers["road_price"] != pytest.approx(one_traveler["road_price"] * 5)
+
+
+# ═══════════════════ road-route endpoint & geocode fallback tests ═══════════════════
+
+def test_amadeus_get_destination_coords_returns_none_for_unknown():
+    """amadeus_service.get_destination_coords must return None (never random
+    coordinates) when a destination cannot be resolved."""
+    assert server.amadeus_service.get_destination_coords("CompletelyUnknownCity12345") is None
+    # Known cities still return their real coords
+    assert server.amadeus_service.get_destination_coords("paris") == {'lat': 48.8566, 'lng': 2.3522}
+
+
+def test_geocode_place_returns_none_when_unresolvable(monkeypatch):
+    """server._geocode_place must return None when both locations_service and
+    amadeus_service fail to resolve the place, never random coordinates."""
+    async def _fail_geocode(place):
+        return None
+
+    monkeypatch.setattr(server.locations_service, "geocode_destination", _fail_geocode)
+    result = _run(server._geocode_place("UnknownPlaceXYZ"))
+    assert result is None
+
+
+def test_road_route_fails_with_502_when_origin_and_dest_fail_geocoding(monkeypatch):
+    """GET /trips/{trip_id}/road-route must return HTTP 502 with a clear error
+    when origin and destination cannot be geocoded, never random coordinates."""
+    from fastapi import HTTPException
+    from routes.trips import get_trip_road_route
+    from routes.shared import User
+
+    trip_id = f"test_road_route_fail_{uuid.uuid4().hex[:8]}"
+    trip_doc = {
+        "trip_id": trip_id,
+        "user_id": USER_ID,
+        "preferences": {
+            "starting_location": "UnresolvableOriginCity",
+            "destination": "UnresolvableDestCity",
+            "transportation": "Road Trip",
+        },
+        "plans": [
+            {
+                "plan_type": "Budget",
+                "anchor_pricing": {
+                    "road_origin_coords": None,
+                    "road_dest_coords": None,
+                },
+            }
+        ],
+    }
+
+    fake_user = User(
+        user_id=USER_ID,
+        email="test@eyv.com",
+        name="Test User",
+        created_at=datetime.now(timezone.utc),
+    )
+
+    async def _mock_get_current_user(request):
+        return fake_user
+
+    async def _mock_geocode_place(place):
+        return None
+
+    monkeypatch.setattr("routes.trips.get_current_user", _mock_get_current_user)
+    monkeypatch.setattr("routes.trips._geocode_place", _mock_geocode_place)
+    monkeypatch.setattr(server, "_geocode_place", _mock_geocode_place)
+
+    class FakeRequest:
+        pass
+
+    async def _test():
+        db = _db()
+        monkeypatch.setattr(server, "db", db)
+        await db.trips.insert_one(trip_doc)
+        try:
+            with pytest.raises(HTTPException) as exc_info:
+                await get_trip_road_route(trip_id, FakeRequest())
+            assert exc_info.value.status_code == 502
+            assert "Could not geocode this trip's origin/destination" in exc_info.value.detail
+        finally:
+            await db.trips.delete_one({"trip_id": trip_id})
+
+    _run(_test())
+
+
+def test_road_route_fails_with_502_when_one_endpoint_fails_geocoding(monkeypatch):
+    """GET /trips/{trip_id}/road-route must return HTTP 502 if either origin or destination
+    fails to geocode."""
+    from fastapi import HTTPException
+    from routes.trips import get_trip_road_route
+    from routes.shared import User
+
+    trip_id = f"test_road_route_partial_{uuid.uuid4().hex[:8]}"
+    trip_doc = {
+        "trip_id": trip_id,
+        "user_id": USER_ID,
+        "preferences": {
+            "starting_location": "Mumbai",
+            "destination": "UnresolvableDestCity",
+            "transportation": "Road Trip",
+        },
+        "plans": [],
+    }
+
+    fake_user = User(
+        user_id=USER_ID,
+        email="test@eyv.com",
+        name="Test User",
+        created_at=datetime.now(timezone.utc),
+    )
+
+    async def _mock_get_current_user(request):
+        return fake_user
+
+    async def _mock_geocode_place(place):
+        if "mumbai" in place.lower():
+            return ORIGIN_COORDS
+        return None
+
+    monkeypatch.setattr("routes.trips.get_current_user", _mock_get_current_user)
+    monkeypatch.setattr("routes.trips._geocode_place", _mock_geocode_place)
+    monkeypatch.setattr(server, "_geocode_place", _mock_geocode_place)
+
+    class FakeRequest:
+        pass
+
+    async def _test():
+        db = _db()
+        monkeypatch.setattr(server, "db", db)
+        await db.trips.insert_one(trip_doc)
+        try:
+            with pytest.raises(HTTPException) as exc_info:
+                await get_trip_road_route(trip_id, FakeRequest())
+            assert exc_info.value.status_code == 502
+            assert "Could not geocode this trip's origin/destination" in exc_info.value.detail
+        finally:
+            await db.trips.delete_one({"trip_id": trip_id})
+
+    _run(_test())
+
+
+def test_road_route_succeeds_with_valid_coordinates(monkeypatch):
+    """GET /trips/{trip_id}/road-route returns 200 with origin/destination lat/lng
+    and driving route when geocoding succeeds."""
+    from routes.trips import get_trip_road_route
+    from routes.shared import User
+
+    trip_id = f"test_road_route_ok_{uuid.uuid4().hex[:8]}"
+    trip_doc = {
+        "trip_id": trip_id,
+        "user_id": USER_ID,
+        "preferences": {
+            "starting_location": "Mumbai",
+            "destination": "Pune",
+            "transportation": "Road Trip",
+        },
+        "plans": [
+            {
+                "plan_type": "Budget",
+                "anchor_pricing": {
+                    "road_origin_coords": ORIGIN_COORDS,
+                    "road_dest_coords": DEST_COORDS,
+                },
+            }
+        ],
+    }
+
+    fake_user = User(
+        user_id=USER_ID,
+        email="test@eyv.com",
+        name="Test User",
+        created_at=datetime.now(timezone.utc),
+    )
+
+    async def _mock_get_current_user(request):
+        return fake_user
+
+    async def _mock_driving_route(orig, dest):
+        return {"points": [[orig["lat"], orig["lng"]], [dest["lat"], dest["lng"]]], "distance_km": 150.0, "duration_min": 180}
+
+    monkeypatch.setattr("routes.trips.get_current_user", _mock_get_current_user)
+    monkeypatch.setattr(server.locations_service, "get_driving_route", _mock_driving_route)
+
+    class FakeRequest:
+        pass
+
+    async def _test():
+        db = _db()
+        monkeypatch.setattr(server, "db", db)
+        await db.trips.insert_one(trip_doc)
+        try:
+            res = await get_trip_road_route(trip_id, FakeRequest())
+            assert res["origin"]["lat"] == ORIGIN_COORDS["lat"]
+            assert res["origin"]["lng"] == ORIGIN_COORDS["lng"]
+            assert res["origin"]["name"] == "Mumbai"
+            assert res["destination"]["lat"] == DEST_COORDS["lat"]
+            assert res["destination"]["lng"] == DEST_COORDS["lng"]
+            assert res["destination"]["name"] == "Pune"
+            assert res["route"]["distance_km"] == 150.0
+        finally:
+            await db.trips.delete_one({"trip_id": trip_id})
+
+    _run(_test())
+
+

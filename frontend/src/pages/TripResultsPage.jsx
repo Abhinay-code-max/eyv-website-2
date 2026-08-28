@@ -259,6 +259,7 @@ const TripResultsPage = () => {
   const [roadRoute, setRoadRoute] = useState(null);
   const [roadOriginDestMarkers, setRoadOriginDestMarkers] = useState([]);
   const [roadHotelMarkers, setRoadHotelMarkers] = useState([]);
+  const [unlocatedStopsCount, setUnlocatedStopsCount] = useState(0);
   // Road Trip map Phase 2: opt-in live position tracking + proximity
   // alerts. Demo-grade only, by design - screen-on/tab-open is the
   // accepted constraint, no background/PWA tracking attempted.
@@ -390,7 +391,10 @@ const TripResultsPage = () => {
   // this being re-run as `selectedPlan` naturally changes across
   // polling/regeneration can't pile up duplicate pins for the same hotel.
   useEffect(() => {
-    if (!isRoadTrip(trip) || !selectedPlan?.itinerary) return;
+    if (!isRoadTrip(trip) || !selectedPlan?.itinerary) {
+      setUnlocatedStopsCount(0);
+      return;
+    }
 
     // Sorted by numeric day suffix, NOT object insertion order - "day_10"
     // otherwise sorts before "day_2" as plain object keys, which would put
@@ -441,12 +445,16 @@ const TripResultsPage = () => {
       seen.add(key);
       hotelStops.push({ name: acc.name, location: isPlaceholder(location) ? '' : location });
     }
-    if (hotelStops.length === 0) return;
+    if (hotelStops.length === 0) {
+      setUnlocatedStopsCount(0);
+      return;
+    }
 
     let cancelled = false;
 
     (async () => {
       const hotelMarkers = [];
+      let failedCount = 0;
       for (const { name: hotelName, location } of hotelStops) {
         const city = location || trip.preferences.destination;
         try {
@@ -455,7 +463,7 @@ const TripResultsPage = () => {
             withCredentials: true,
           });
           if (cancelled) return;
-          const { lat, lng, name } = response.data;
+          const { lat, lng, name } = response.data || {};
           if (lat != null && lng != null) {
             // /locations/venue-coords falls back to the CITY's centroid
             // (returning the queried city's own name) when it can't resolve
@@ -467,17 +475,27 @@ const TripResultsPage = () => {
             // so without this every pin on the map would look identical.
             const description = location ? `Overnight stop — ${location}` : 'Overnight stop';
             hotelMarkers.push({ lat, lng, title: hotelName, description, tier });
+          } else {
+            failedCount += 1;
           }
         } catch (error) {
           console.error(`Hotel geocode error for "${hotelName}":`, error);
+          failedCount += 1;
         }
       }
-      if (!cancelled) setRoadHotelMarkers(hotelMarkers);
+      if (!cancelled) {
+        setRoadHotelMarkers(hotelMarkers);
+        setUnlocatedStopsCount(failedCount);
+        if (failedCount > 0) {
+          toast.warning(`${failedCount} stop${failedCount > 1 ? 's' : ''} couldn't be located and ${failedCount > 1 ? "aren't" : "isn't"} shown on the map.`);
+        }
+      }
     })();
 
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedPlan, trip?.preferences?.destination]);
+
 
   // Road Trip map Phase 2: the ordered list of stops live tracking checks
   // proximity against - each day's hotel (already day-sorted above) plus
@@ -929,6 +947,12 @@ const TripResultsPage = () => {
                       We couldn't pinpoint this destination exactly - the map below is centered on an approximate location.
                     </p>
                   )}
+                  {unlocatedStopsCount > 0 && isRoadTrip(trip) && (
+                    <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-4">
+                      {unlocatedStopsCount} stop{unlocatedStopsCount > 1 ? 's' : ''} couldn't be located and {unlocatedStopsCount > 1 ? "aren't" : "isn't"} shown on the map.
+                    </p>
+                  )}
+
                   <TripMap
                     center={mapCenter}
                     markers={

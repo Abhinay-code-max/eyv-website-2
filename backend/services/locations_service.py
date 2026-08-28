@@ -2,11 +2,29 @@
 Location autocomplete + geocoding service.
 Uses curated popular destinations list + Nominatim (OpenStreetMap) for geocoding.
 """
+import asyncio
 import logging
+import time
 from typing import List, Dict, Optional
 import httpx
 
 logger = logging.getLogger(__name__)
+
+# Nominatim (OpenStreetMap) rate-limiting & caching
+# Nominatim Usage Policy enforces a strict maximum of 1 request/second.
+# We maintain an in-process asyncio lock with interval throttling across concurrent requests,
+# and an in-memory query cache to avoid redundant hits.
+# NOTE: This in-process lock coordinates throttling within a single uvicorn worker process
+# (as deployed today in Dockerfile via `exec uvicorn server:app ...` with 1 worker).
+# If the service is ever scaled to multiple worker processes or multi-instance containers,
+# cross-process throttling (e.g. via Redis rate-limiting or an external geocoding proxy)
+# would be needed to maintain the global 1 req/sec limit across all workers.
+_nominatim_lock = asyncio.Lock()
+_last_nominatim_request_time: float = 0.0
+NOMINATIM_MIN_INTERVAL: float = 1.1  # seconds between requests (1 req/sec + margin)
+_nominatim_cache: Dict[str, Optional[Dict[str, float]]] = {}
+
+
 
 # Curated popular destinations - prioritized for India + worldwide
 POPULAR_DESTINATIONS = [
@@ -119,28 +137,78 @@ async def _nominatim_search(query: str) -> Optional[Dict[str, float]]:
     """Raw Nominatim (OpenStreetMap) free-text geocode - no API key, no
     curated-list shortcut. Shared by geocode_destination (city-level, tried
     LAST after the curated list below) and geocode_venue (venue-level,
-    tried FIRST - see that function's docstring for why the order flips)."""
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                "https://nominatim.openstreetmap.org/search",
-                params={"q": query, "format": "json", "limit": 1},
-                headers={"User-Agent": "EYV-Travel-App/1.0"},
-                timeout=10.0,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                if data and len(data) > 0:
-                    result = data[0]
-                    return {
-                        "lat": float(result["lat"]),
-                        "lng": float(result["lon"]),
-                        "name": result.get("display_name", query).split(",")[0],
-                    }
-    except Exception as e:
-        logger.warning(f"Nominatim geocode failed for '{query}': {e}")
+    tried FIRST - see that function's docstring for why the order flips).
+    
+    Enforces Nominatim's strict 1 req/sec usage policy via _nominatim_lock,
+    caches responses in memory, and retries with backoff on 429/503.
+    """
+    if not query or not query.strip():
+        return None
 
-    return None
+    normalized_query = query.strip().lower()
+
+    # Fast-path cache lookup
+    if normalized_query in _nominatim_cache:
+        return _nominatim_cache[normalized_query]
+
+    global _last_nominatim_request_time
+
+    async with _nominatim_lock:
+        # Re-check cache inside lock in case another coroutine populated it
+        if normalized_query in _nominatim_cache:
+            return _nominatim_cache[normalized_query]
+
+        for attempt in range(2):
+            now = time.monotonic()
+            elapsed = now - _last_nominatim_request_time
+            if elapsed < NOMINATIM_MIN_INTERVAL:
+                await asyncio.sleep(NOMINATIM_MIN_INTERVAL - elapsed)
+
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(
+                        "https://nominatim.openstreetmap.org/search",
+                        params={"q": query, "format": "json", "limit": 1},
+                        headers={"User-Agent": "EYV-Travel-App/1.0 (contact: admin@eyvtravel.com)"},
+                        timeout=10.0,
+                    )
+                    _last_nominatim_request_time = time.monotonic()
+
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        if data and len(data) > 0:
+                            result = data[0]
+                            coords = {
+                                "lat": float(result["lat"]),
+                                "lng": float(result["lon"]),
+                                "name": result.get("display_name", query).split(",")[0],
+                            }
+                            _nominatim_cache[normalized_query] = coords
+                            return coords
+                        # Legitimate 200 OK with no matches found
+                        _nominatim_cache[normalized_query] = None
+                        return None
+                    elif resp.status_code in (429, 503):
+                        logger.warning(
+                            f"Nominatim rate limited ({resp.status_code}) for '{query}', attempt {attempt + 1}/2"
+                        )
+                        if attempt == 0:
+                            await asyncio.sleep(2.0)
+                            _last_nominatim_request_time = time.monotonic()
+                            continue
+                    else:
+                        logger.warning(
+                            f"Nominatim geocode failed for '{query}' with HTTP {resp.status_code}: {resp.text[:100]}"
+                        )
+                        break
+            except Exception as e:
+                _last_nominatim_request_time = time.monotonic()
+                logger.warning(f"Nominatim geocode failed for '{query}': {e}")
+                break
+
+        _nominatim_cache[normalized_query] = None
+        return None
+
 
 
 async def geocode_destination(destination: str) -> Optional[Dict[str, float]]:

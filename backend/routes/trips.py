@@ -323,10 +323,9 @@ def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
 
 
 async def _geocode_place(place: str) -> Optional[Dict[str, float]]:
-    """Geocode a place name using the same fallback chain as the
-    /destinations/{destination}/coords endpoint: curated list + Nominatim
-    first (locations_service), then amadeus_service's mock coords as a last
-    resort so callers always get *something* to plot rather than nothing."""
+    """Geocode a place name using the fallback chain: curated list + Nominatim
+    first (locations_service), then amadeus_service's curated destination coords.
+    Returns None if the place cannot be geocoded (never random coordinates)."""
     srv = sys.modules.get("server")
     if srv is not None and hasattr(srv, "_geocode_place") and srv._geocode_place is not _geocode_place:
         return await srv._geocode_place(place)
@@ -334,6 +333,7 @@ async def _geocode_place(place: str) -> Optional[Dict[str, float]]:
     if not coords:
         coords = amadeus_service.get_destination_coords(place)
     return coords
+
 
 
 # Neither Ignav (flights) nor SerpApi (hotels) exposes separate child/senior

@@ -1,6 +1,7 @@
 """Search & Locations API router (/api/search/*, /api/destinations/*, /api/locations/*).
 """
 import logging
+import random
 from typing import Optional
 from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel
@@ -120,15 +121,15 @@ async def get_destination_coords_endpoint(destination: str, request: Request):
     coords = await locations_service.geocode_destination(destination)
     if coords:
         return {**coords, "geocoded": True}
-    # Final fallback: amadeus_service.get_destination_coords never returns
-    # None - worst case it hands back a random point anywhere on the globe.
-    # That's still useful as SOMETHING to plot, but it's a guess, not a real
-    # geocode, and looks identical to a correct pin unless callers are told
-    # otherwise - geocoded: False lets the frontend say so instead of
-    # silently centering the map on a location that has nothing to do with
-    # the actual destination.
     coords = amadeus_service.get_destination_coords(destination)
+    if coords:
+        return {**coords, "geocoded": False}
+    # Final fallback for single-destination overview map pin:
+    # return an approximate random point flagged with geocoded: False so the
+    # frontend displays an "uncertain location" warning to the user.
+    coords = {'lat': round(random.uniform(10, 50), 4), 'lng': round(random.uniform(-100, 100), 4)}
     return {**coords, "geocoded": False}
+
 
 
 @router.get("/locations/venue-coords")

@@ -74,14 +74,17 @@ DESTINATION_COORDS = {
 }
 
 
-def get_destination_coords(destination: str) -> Dict[str, float]:
-    """Get coordinates for a destination, defaulting to random nearby coords."""
+def get_destination_coords(destination: str) -> Optional[Dict[str, float]]:
+    """Get curated coordinates for a destination, or None if unknown.
+    Never returns random coordinates - callers should handle None explicitly."""
+    if not destination:
+        return None
     key = destination.lower().strip()
     for dest_key, coords in DESTINATION_COORDS.items():
         if dest_key in key or key in dest_key:
             return coords
-    # Default to a reasonable random location
-    return {'lat': round(random.uniform(10, 50), 4), 'lng': round(random.uniform(-100, 100), 4)}
+    return None
+
 
 
 def _generate_mock_flights(origin: str, destination: str, departure_date: str, return_date: str, travelers: int) -> List[Dict]:
@@ -140,6 +143,8 @@ def _generate_mock_hotels(destination: str, check_in: str, check_out: str, trave
     hotels = []
     base_price = random.randint(80, 300)
     dest_coords = get_destination_coords(destination)
+    if not dest_coords:
+        dest_coords = {'lat': round(random.uniform(10, 50), 4), 'lng': round(random.uniform(-100, 100), 4)}
     
     for i in range(8):
         chain = random.choice(HOTEL_CHAINS)
