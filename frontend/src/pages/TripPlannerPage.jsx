@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Calendar, ChevronRight, ChevronLeft, Sparkles } from 'lucide-react';
+import { Calendar, ChevronRight, ChevronLeft, Sparkles, LocateFixed } from 'lucide-react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import axios from 'axios';
 import {
@@ -81,6 +81,65 @@ const TripPlannerPage = ({ user }) => {
   // because of the destination-type nudge, so a later destination change can
   // swap it out without touching anything the user picked themselves.
   const [autoNudgedInterest, setAutoNudgedInterest] = useState(null);
+
+  // True while the browser geolocation + reverse-geocode round-trip is in flight.
+  const [geolocating, setGeolocating] = useState(false);
+
+  /**
+   * "Use my current location" handler.
+   * 1. Asks the browser for lat/lng via the Geolocation API.
+   * 2. Reverse-geocodes to a city name via GET /api/locations/reverse-geocode.
+   * 3. Populates formData.starting_location and startingLocationMeta with the
+   *    same shape that LocationAutocomplete's onSelect produces, so downstream
+   *    road-trip code that relies on startingLocationMeta.lat/.lng keeps working.
+   */
+  const handleUseMyLocation = () => {
+    if (!navigator.geolocation) {
+      toast.error('Geolocation is not supported by your browser.');
+      return;
+    }
+    setGeolocating(true);
+    navigator.geolocation.getCurrentPosition(
+      async (position) => {
+        const { latitude: lat, longitude: lng } = position.coords;
+        try {
+          const res = await axios.get(
+            `${API_URL}/locations/reverse-geocode`,
+            { params: { lat, lng }, withCredentials: true }
+          );
+          const { name, city, country, country_code: countryCode } = res.data;
+          const displayName = city
+            ? country ? `${city}, ${country}` : city
+            : name;
+          // Populate the text field
+          setFormData(prev => ({ ...prev, starting_location: displayName }));
+          // Populate meta - matches LocationAutocomplete onSelect shape exactly:
+          // { country, type, lat, lng }
+          setStartingLocationMeta({
+            country: country || countryCode || '',
+            type: 'city',
+            lat: res.data.lat,
+            lng: res.data.lng,
+          });
+        } catch {
+          toast.error('Could not resolve your location to a city name. Try typing it instead.');
+        } finally {
+          setGeolocating(false);
+        }
+      },
+      (err) => {
+        setGeolocating(false);
+        if (err.code === 1 /* PERMISSION_DENIED */) {
+          toast.error('Location access was denied. Please type your starting city instead.');
+        } else if (err.code === 3 /* TIMEOUT */) {
+          toast.error('Location request timed out. Please type your starting city instead.');
+        } else {
+          toast.error('Could not get your location. Please type your starting city instead.');
+        }
+      },
+      { timeout: 10000, maximumAge: 60000 }
+    );
+  };
 
   // Fields with a smart default: once true, the auto-fill effects for that
   // field stop overriding it - the user's explicit choice always wins.
@@ -306,7 +365,31 @@ const TripPlannerPage = ({ user }) => {
                   </div>
                 </div>
                 <div>
-                  <Label className="text-[#C47245] uppercase tracking-wider text-xs font-medium">Starting Location</Label>
+                  <div className="flex items-center justify-between">
+                    <Label className="text-[#C47245] uppercase tracking-wider text-xs font-medium">Starting Location</Label>
+                    <button
+                      type="button"
+                      onClick={handleUseMyLocation}
+                      disabled={geolocating}
+                      className="flex items-center gap-1 text-xs text-[#C47245] hover:text-[#a05a30] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                      title="Auto-fill your current location"
+                    >
+                      {geolocating ? (
+                        <>
+                          <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24" fill="none">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                          </svg>
+                          Detecting…
+                        </>
+                      ) : (
+                        <>
+                          <LocateFixed size={12} />
+                          Use my location
+                        </>
+                      )}
+                    </button>
+                  </div>
                   <div className="mt-2">
                     <LocationAutocomplete
                       testId={TRIP_PLANNER.startLocationInput}

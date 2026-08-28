@@ -255,11 +255,11 @@ jobs:
       # the same reason - it shares the `client` TestClient fixture/Limiter
       # state with test_internal_jarvis_api.py (its one integration test
       # hits /jarvis/queue).
-      - name: Run internal JARVIS API, admin API, and rate-limit-key tests
+      - name: Run internal JARVIS API, admin API, reverse-geocode, and rate-limit-key tests
         working-directory: backend
         run: |
           set +e
-          pytest tests/test_internal_jarvis_api.py tests/test_rate_limit_keys.py tests/test_admin_api.py \
+          pytest tests/test_internal_jarvis_api.py tests/test_rate_limit_keys.py tests/test_admin_api.py tests/test_reverse_geocode.py \
             -v --junit-xml=pytest-jarvis-results.xml 2>&1 | tee pytest-jarvis-output.log
           exit ${PIPESTATUS[0]}
 

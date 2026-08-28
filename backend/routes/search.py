@@ -153,3 +153,18 @@ async def locations_autocomplete(request: Request, q: str = Query("", min_length
     Public endpoint - used on landing page as well."""
     suggestions = locations_service.search_locations(q, limit=8)
     return {"suggestions": suggestions}
+
+
+@router.get("/locations/reverse-geocode")
+@limiter.limit("10/minute")  # per-IP - lower than autocomplete; only called once per geolocation request
+async def reverse_geocode_endpoint(request: Request, lat: float = Query(...), lng: float = Query(...)):
+    """Reverse-geocode a lat/lng to a human-readable city/country name.
+    Used by the 'Use my current location' feature in TripPlannerPage to convert
+    browser Geolocation API coordinates into a Starting Location display name.
+    Requires authentication (same as all other location endpoints)."""
+    await get_current_user(request)
+    result = await locations_service.reverse_geocode(lat, lng)
+    if not result:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Could not resolve location from coordinates")
+    return result

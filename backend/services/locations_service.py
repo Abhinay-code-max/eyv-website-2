@@ -210,6 +210,101 @@ async def _nominatim_search(query: str) -> Optional[Dict[str, float]]:
         return None
 
 
+_nominatim_reverse_cache: Dict[str, Optional[Dict]] = {}
+
+
+async def reverse_geocode(lat: float, lng: float) -> Optional[Dict]:
+    """Reverse-geocode a lat/lng to a human-readable location name via Nominatim's
+    /reverse endpoint.  Uses the same in-process lock, minimum interval, and in-memory
+    cache as _nominatim_search so both forward and reverse hits share the same global
+    throttle and respect Nominatim's 1 req/sec usage policy.
+
+    Returns a dict:
+        { "name": str, "city": str, "country": str, "country_code": str,
+          "lat": float, "lng": float }
+    or None on failure / no result.
+    """
+    cache_key = f"{round(lat, 5)},{round(lng, 5)}"
+
+    if cache_key in _nominatim_reverse_cache:
+        return _nominatim_reverse_cache[cache_key]
+
+    global _last_nominatim_request_time
+
+    async with _nominatim_lock:
+        if cache_key in _nominatim_reverse_cache:
+            return _nominatim_reverse_cache[cache_key]
+
+        for attempt in range(2):
+            now = time.monotonic()
+            elapsed = now - _last_nominatim_request_time
+            if elapsed < NOMINATIM_MIN_INTERVAL:
+                await asyncio.sleep(NOMINATIM_MIN_INTERVAL - elapsed)
+
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(
+                        "https://nominatim.openstreetmap.org/reverse",
+                        params={"lat": lat, "lon": lng, "format": "jsonv2"},
+                        headers={"User-Agent": "EYV-Travel-App/1.0 (contact: admin@eyvtravel.com)"},
+                        timeout=10.0,
+                    )
+                    _last_nominatim_request_time = time.monotonic()
+
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        addr = data.get("address", {})
+                        # Build a readable city name: prefer city → town → village → county
+                        city = (
+                            addr.get("city")
+                            or addr.get("town")
+                            or addr.get("village")
+                            or addr.get("county")
+                            or ""
+                        )
+                        country = addr.get("country", "")
+                        country_code = addr.get("country_code", "").upper()
+                        # Best human-readable short name: city if present, else first
+                        # segment of display_name, else fall back to raw display_name.
+                        display = data.get("display_name", "")
+                        name = city or (display.split(",")[0].strip() if display else "")
+                        result = {
+                            "name": name,
+                            "city": city,
+                            "country": country,
+                            "country_code": country_code,
+                            "lat": float(data.get("lat", lat)),
+                            "lng": float(data.get("lon", lng)),
+                        }
+                        _nominatim_reverse_cache[cache_key] = result
+                        return result
+                    elif resp.status_code == 404:
+                        # Nominatim returns 404 for coords with no nearby feature
+                        _nominatim_reverse_cache[cache_key] = None
+                        return None
+                    elif resp.status_code in (429, 503):
+                        logger.warning(
+                            f"Nominatim reverse rate limited ({resp.status_code}) "
+                            f"for ({lat},{lng}), attempt {attempt + 1}/2"
+                        )
+                        if attempt == 0:
+                            await asyncio.sleep(2.0)
+                            _last_nominatim_request_time = time.monotonic()
+                            continue
+                    else:
+                        logger.warning(
+                            f"Nominatim reverse failed for ({lat},{lng}) "
+                            f"with HTTP {resp.status_code}: {resp.text[:100]}"
+                        )
+                        break
+            except Exception as e:
+                _last_nominatim_request_time = time.monotonic()
+                logger.warning(f"Nominatim reverse failed for ({lat},{lng}): {e}")
+                break
+
+        _nominatim_reverse_cache[cache_key] = None
+        return None
+
 
 async def geocode_destination(destination: str) -> Optional[Dict[str, float]]:
     """
