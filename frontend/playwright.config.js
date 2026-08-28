@@ -64,7 +64,13 @@ module.exports = defineConfig({
         DB_NAME: process.env.DB_NAME || 'test_database',
         CORS_ORIGINS: FRONTEND_URL,
         WALLET_URL_SIGNING_SECRET: process.env.WALLET_URL_SIGNING_SECRET || 'e2e-placeholder-wallet-signing-secret',
+        INTERNAL_TICKET_API_TOKEN: process.env.INTERNAL_TICKET_API_TOKEN || 'e2e-placeholder-internal-ticket-api-token',
+        INTERNAL_ANALYTICS_API_TOKEN: process.env.INTERNAL_ANALYTICS_API_TOKEN || 'e2e-placeholder-internal-analytics-api-token',
+        JARVIS_QUEUE_API_TOKEN: process.env.JARVIS_QUEUE_API_TOKEN || 'e2e-placeholder-jarvis-queue-api-token',
+        ADMIN_API_KEY: process.env.ADMIN_API_KEY || 'ci-placeholder-admin-api-key-not-a-real-secret',
+        REVENUECAT_WEBHOOK_AUTH_KEY: process.env.REVENUECAT_WEBHOOK_AUTH_KEY || 'ci-placeholder-revenuecat-webhook-auth-key-not-a-real-secret',
       },
     },
   ],
 });
+

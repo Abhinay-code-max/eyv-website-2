@@ -66,7 +66,15 @@ jobs:
       # it authenticates every /jarvis/* request and is imported
       # unconditionally by server.py.
       JARVIS_QUEUE_API_TOKEN: ci-placeholder-jarvis-queue-api-token-not-a-real-secret
+      # Same reasoning, for admin_api.py's ADMIN_API_KEY -
+      # it authenticates every /api/admin/* request and is imported
+      # unconditionally by server.py.
+      ADMIN_API_KEY: ci-placeholder-admin-api-key-not-a-real-secret
+      # Same reasoning, for routes/shared.py's REVENUECAT_WEBHOOK_AUTH_KEY -
+      # it authenticates incoming RevenueCat webhooks and is checked unconditionally at startup.
+      REVENUECAT_WEBHOOK_AUTH_KEY: ci-placeholder-revenuecat-webhook-auth-key-not-a-real-secret
       # The Gemini client is a lazy singleton (_get_gemini_client in
+
       # server.py) - not required just to import server.py.
       # backend_test.py's real-Gemini-touching tests (test_chat_stream_authorized,
       # test_trip_generate_and_lifecycle) still run with this placeholder: the
@@ -204,6 +212,10 @@ jobs:
       # test_internal_jarvis_api.py (added to the pytest list below) reads
       # it back from this same env var.
       JARVIS_QUEUE_API_TOKEN: ci-placeholder-jarvis-queue-api-token-not-a-real-secret
+      # Same reasoning, for admin_api.py's ADMIN_API_KEY.
+      ADMIN_API_KEY: ci-placeholder-admin-api-key-not-a-real-secret
+      # Same reasoning, for routes/shared.py's REVENUECAT_WEBHOOK_AUTH_KEY.
+      REVENUECAT_WEBHOOK_AUTH_KEY: ci-placeholder-revenuecat-webhook-auth-key-not-a-real-secret
       GEMINI_API_KEY: ci-placeholder-unused
     steps:
       - uses: actions/checkout@v4
@@ -243,13 +255,14 @@ jobs:
       # the same reason - it shares the `client` TestClient fixture/Limiter
       # state with test_internal_jarvis_api.py (its one integration test
       # hits /jarvis/queue).
-      - name: Run internal JARVIS API and rate-limit-key tests
+      - name: Run internal JARVIS API, admin API, and rate-limit-key tests
         working-directory: backend
         run: |
           set +e
-          pytest tests/test_internal_jarvis_api.py tests/test_rate_limit_keys.py \
+          pytest tests/test_internal_jarvis_api.py tests/test_rate_limit_keys.py tests/test_admin_api.py \
             -v --junit-xml=pytest-jarvis-results.xml 2>&1 | tee pytest-jarvis-output.log
           exit ${PIPESTATUS[0]}
+
       - name: Upload backend unit test output
         if: always()
         uses: actions/upload-artifact@v4
@@ -290,7 +303,12 @@ jobs:
       INTERNAL_ANALYTICS_API_TOKEN: ci-placeholder-internal-analytics-api-token-not-a-real-secret
       # Same reasoning, for internal_jarvis_api.py's JARVIS_QUEUE_API_TOKEN.
       JARVIS_QUEUE_API_TOKEN: ci-placeholder-jarvis-queue-api-token-not-a-real-secret
+      # Same reasoning, for admin_api.py's ADMIN_API_KEY.
+      ADMIN_API_KEY: ci-placeholder-admin-api-key-not-a-real-secret
+      # Same reasoning, for routes/shared.py's REVENUECAT_WEBHOOK_AUTH_KEY.
+      REVENUECAT_WEBHOOK_AUTH_KEY: ci-placeholder-revenuecat-webhook-auth-key-not-a-real-secret
       GEMINI_API_KEY: ci-placeholder-unused
+
       # Same caveat as backend-tests: without a real Stripe *test-mode*
       # secret, booking-flow.spec.js still passes (it accepts the app's own
       # handled "Stripe not configured" error as a valid outcome), it just

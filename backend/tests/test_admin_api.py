@@ -49,9 +49,27 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+import httpx
+import server
+from agents.clients.base import BaseInternalClient
+
 @pytest.fixture(autouse=True)
-def cleanup_admin_test_records():
-    """Wipes test admin sessions and audit logs between tests."""
+def cleanup_admin_test_records(monkeypatch):
+    """Wipes test admin sessions and audit logs between tests, and routes internal clients through ASGI."""
+    async def _asgi_request(self, method, path, *, json=None, params=None):
+        headers = self._get_headers()
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app), base_url="http://test") as ac:
+            res = await ac.request(method, path, json=json, params=params, headers=headers)
+            if res.status_code >= 400:
+                raise httpx.HTTPStatusError(
+                    f"Internal API error {res.status_code}: {res.text}",
+                    request=res.request,
+                    response=res,
+                )
+            return res.json() if res.content else {}
+
+    monkeypatch.setattr(BaseInternalClient, "_request", _asgi_request)
+
     async def _clean():
         db = _db()
         await db.admin_sessions.delete_many({})
@@ -66,6 +84,8 @@ def cleanup_admin_test_records():
         _limiter._storage.reset()
     except Exception:
         pass
+
+
 
 
 # ═══════════════ 1. AST Scope Isolation ═══════════════
